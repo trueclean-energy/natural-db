@@ -456,6 +456,14 @@ ${timezone ? `- User Timezone: ${timezone}` : ''}
       });
     }
 
+    const allowedRoles = ["user", "assistant", "system"];
+
+    const mappedMessages = messagesForAI.map(msg =>
+      allowedRoles.includes(msg.role)
+        ? msg
+        : { ...msg, role: "system", content: `[ROUTINE_TASK] ${msg.content}` }
+    );
+
     const allRelevantContext = [...relevantContext];
     if (incomingMessageRole === "system_routine_task" && metadata.originalUserMessage) {
       allRelevantContext.push({
@@ -468,13 +476,13 @@ ${timezone ? `- User Timezone: ${timezone}` : ''}
       const relevantContextText = allRelevantContext
         .map(msg => `- ${msg.content}`)
         .join('\n');
-      enhancedSystemPrompt = `${systemPrompt}\n\nRelevant Context:\n${relevantContextText}`;
+      enhancedSystemPrompt = `${systemPrompt}\n\nRelevant Context from previous messages:\n${relevantContextText}`;
     }
 
     const result = await generateText({
       model: openai.responses(openaiModel),
       system: enhancedSystemPrompt,
-      messages: messagesForAI,
+      messages: mappedMessages,
       providerOptions: {
         openai: {
           store: false,

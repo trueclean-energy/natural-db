@@ -112,7 +112,7 @@ export async function searchSimilarMessages(
 
   const result = await handleDbOperation("search_similar_messages", async (connection) => {
     // Set IVFFlat probes for better recall (balances speed vs accuracy)
-    await connection.queryObject("SET LOCAL ivfflat.probes = 3;");
+    await connection.queryObject("SET ivfflat.probes = 3;");
     
     // Use parameterized query to safely pass the embedding vector
     const result = await connection.queryObject({

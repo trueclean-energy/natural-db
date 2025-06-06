@@ -110,23 +110,27 @@ export async function searchSimilarMessages(
     return { result: [], error: null };
   }
 
-  const query = `
-    SELECT role, content, created_at, 
-           1 - (embedding <=> '${embedding}'::vector) as similarity_score
-    FROM public.messages 
-    WHERE chat_id = '${chatId}'
-      AND embedding IS NOT NULL
-      AND content IS NOT NULL
-      AND content != ''
-    ORDER BY embedding <=> '${embedding}'::vector
-    LIMIT ${maxResults};
-  `;
-
   const result = await handleDbOperation("search_similar_messages", async (connection) => {
-    const result = await connection.queryObject(query);
-    return result.rows.filter(
-      (row: any) => row.similarity_score > similarityThreshold
-    );
+    // Set IVFFlat probes for better recall (balances speed vs accuracy)
+    await connection.queryObject("SET LOCAL ivfflat.probes = 3;");
+    
+    // Use parameterized query to safely pass the embedding vector
+    const result = await connection.queryObject({
+      text: `
+        SELECT role, content, created_at, 
+               1 - (embedding <=> $1) as similarity_score
+        FROM public.messages 
+        WHERE chat_id = $2
+          AND embedding IS NOT NULL
+          AND content IS NOT NULL
+          AND content != ''
+          AND 1 - (embedding <=> $1) > $3
+        ORDER BY embedding <=> $1
+        LIMIT $4;
+      `,
+      args: [embedding, chatId.toString(), similarityThreshold, maxResults]
+    });
+    return result.rows;
   });
 
   return result;

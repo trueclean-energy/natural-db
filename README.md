@@ -8,6 +8,14 @@ The result is an AI that builds cumulative intelligence over time, remembering n
 
 ## How It Works: From Natural Language to Structured Memory
 
+### Adaptive Personality System
+
+The assistant maintains two distinct behavioral layers:
+
+**Base Behavior**: Core functionality including database operations, scheduling, web search, and data analysis - these capabilities remain constant.
+
+**Personalized Behavior**: Communication style, personality traits, and interaction preferences that can be customized per user. When you say "be more formal" or "address me by name," these preferences are stored and persist across all conversations.
+
 ### Natural Language to Data Transformation
 
 The core innovation is the LLM's ability to take messy, conversational input and automatically convert it into clean, structured data. When you tell your assistant "I spent $47 on groceries at Whole Foods yesterday, and I'm trying to keep my food budget under $400 this month," the LLM doesn't just acknowledge this—it structures and stores it:
@@ -61,6 +69,16 @@ The system's real power emerges when it needs to combine information from multip
 This multi-query approach lets the LLM build complex answers from structured memories.
 
 ## Real-World Use Cases: Combining All Features
+
+### Case 0: Personalized Fitness Tracking
+
+**Setup**: "I want you to be more encouraging when I'm working on fitness goals, and track my progress with enthusiasm"
+
+**What happens**:
+
+- **Base behavior**: Creates structured fitness tracking tables and schedules progress reviews
+- **Personalized behavior**: Adopts encouraging tone specifically for fitness conversations
+- **Data persistence**: Both the fitness data and personality preferences persist long-term
 
 ### Case 1: Automated Investment Research
 
@@ -230,6 +248,14 @@ These aren't just one-off actions—they're integrated into the data collection 
 
 ## Technical Architecture
 
+### Behavioral Architecture
+
+The system separates core functionality from personalization:
+
+**Base Behavior**: Database operations, scheduling, web search, and tool integration - these remain consistent across all users.
+
+**Personalized Behavior**: Communication style and preferences stored per user with version history for transparency.
+
 ### Natural Language to SQL Translation
 
 The system generates PostgreSQL queries from natural language requests:
@@ -381,6 +407,12 @@ Message your Telegram bot and try these commands:
 - "Remind me to call mom every Sunday at 2 PM"
 - "Show me all my stored budgets"
 
+#### **Test Personalization Features**:
+
+- "Be more formal in your responses"
+- "Address me by my first name"
+- "Be enthusiastic when I discuss hobbies"
+
 ## Architecture Overview
 
 Your assistant runs on three core edge functions:
@@ -507,6 +539,8 @@ The architecture is designed for gradual enhancement—you can start with simple
 **What makes this powerful**:
 
 - **Memory that grows**: Each interaction adds to a structured knowledge base
+- **Consistent base behavior**: Core functionality remains reliable across all interactions
+- **Personalized communication**: Adapts personality and style to individual user preferences
 - **Autonomous intelligence**: Scheduled analysis that builds insights over time
 - **Real-world integration**: Actions in email, calendar, and hundreds of other tools
 - **Multi-step reasoning**: Complex queries that span multiple data sources

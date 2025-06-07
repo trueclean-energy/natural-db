@@ -156,6 +156,73 @@ async function generateMessageEmbedding(content: string): Promise<string | undef
   }
 }
 
+async function getCurrentSystemPrompt(chatId: string): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('system_prompts')
+      .select('prompt_content')
+      .eq('chat_id', chatId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.error('Error fetching system prompt:', error);
+      return null;
+    }
+
+    return data && data.length > 0 ? data[0].prompt_content : null;
+  } catch (error) {
+    console.error('Error in getCurrentSystemPrompt:', error);
+    return null;
+  }
+}
+
+async function updateSystemPrompt(chatId: string, newPrompt: string, description: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    // First, deactivate all existing prompts for this chat
+    const { error: deactivateError } = await supabase
+      .from('system_prompts')
+      .update({ is_active: false })
+      .eq('chat_id', chatId)
+      .eq('is_active', true);
+
+    if (deactivateError) {
+      return { success: false, error: `Failed to deactivate old prompts: ${deactivateError.message}` };
+    }
+
+    // Get the next version number
+    const { data: versionData, error: versionError } = await supabase
+      .from('system_prompts')
+      .select('version')
+      .eq('chat_id', chatId)
+      .order('version', { ascending: false })
+      .limit(1);
+
+    const nextVersion = (versionData && versionData.length > 0) ? versionData[0].version + 1 : 1;
+
+    // Insert the new active prompt
+    const { error: insertError } = await supabase
+      .from('system_prompts')
+      .insert({
+        chat_id: chatId,
+        prompt_content: newPrompt,
+        version: nextVersion,
+        created_by_role: 'assistant',
+        description: description,
+        is_active: true
+      });
+
+    if (insertError) {
+      return { success: false, error: `Failed to insert new prompt: ${insertError.message}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: `Unexpected error: ${error}` };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
@@ -352,6 +419,55 @@ Deno.serve(async (req) => {
           }
         },
       }),
+
+      update_system_prompt: tool({
+        description: "Updates the system prompt that defines the assistant's behavior, personality, and capabilities. Use this when the user wants to change how the assistant behaves or responds.",
+        parameters: z.object({
+          new_system_prompt: z.string().describe("The new system prompt content that will define the assistant's behavior."),
+          description: z.string().describe("Brief description of what this prompt change accomplishes or why it was made."),
+        }),
+        execute: async ({ new_system_prompt, description }) => {
+          if (!id) {
+            return { error: "Chat ID is required to update system prompt." };
+          }
+
+          const result = await updateSystemPrompt(id, new_system_prompt, description);
+          
+          if (result.success) {
+            return `System prompt updated successfully. Description: ${description}. The new prompt will take effect in the next conversation.`;
+          } else {
+            return { error: result.error || "Failed to update system prompt." };
+          }
+        },
+      }),
+
+      get_system_prompt_history: tool({
+        description: "Retrieves the history of system prompt changes for this user, including versions and descriptions.",
+        parameters: z.object({}),
+                execute: async () => {
+          if (!id) {
+            return { error: "Chat ID is required to retrieve system prompt history." };
+          }
+
+          const query = `
+            SELECT version, description, created_by_role, is_active, created_at, 
+                   LENGTH(prompt_content) as prompt_length
+            FROM system_prompts 
+            WHERE chat_id = '${id}' 
+            ORDER BY version DESC 
+            LIMIT 10
+          `;
+          
+          const result = await executeSQL(query);
+          
+          if (result.error) {
+            return { error: result.error };
+          }
+
+          return JSON.stringify(result.result);
+        },
+      }),
+
       ...mcpTools,
     };
 
@@ -380,7 +496,11 @@ Deno.serve(async (req) => {
     }
 
     const now = new Date();
-    const systemPrompt = `You are a highly organized personal assistant.
+    
+    // Get custom system prompt from database
+    const customSystemPrompt = await getCurrentSystemPrompt(id);
+    
+    const baseSystemPrompt = `BASE BEHAVIOR:You are a highly organized personal assistant who .
 
 Database Structure:
 ${formattedSchemaDetails}
@@ -440,9 +560,22 @@ ${timezone ? `- User Timezone: ${timezone}` : ''}
 - Store times in UTC (TIMESTAMPTZ), consider user timezone for display
 - Convert user local time to UTC when scheduling`;
 
+    // Construct the final system prompt - always start with base behavior
+    const selfModificationNote = `
+
+PERSONALIZATION CAPABILITY:
+You can personalize your behavior based on user needs by using the 'update_system_prompt' tool when users request changes to your personality, communication style, or specific capabilities. This allows you to evolve and adapt to user preferences while maintaining a history of all changes.
+
+Use 'get_system_prompt_history' to view previous personalization versions and their descriptions.
+`;
+
+    const finalSystemPrompt = customSystemPrompt 
+      ? `${baseSystemPrompt}\n\nPERSONALIZED BEHAVIOR:\n${customSystemPrompt}\n\n${selfModificationNote}`
+      : `${baseSystemPrompt}${selfModificationNote}`;
+
     // Prepare messages for AI
     let messagesForAI = [...chatHistory];
-    let enhancedSystemPrompt = systemPrompt;
+    let enhancedSystemPrompt = finalSystemPrompt;
     
     if (incomingMessageRole === "system_routine_task") {
       messagesForAI.push({
@@ -476,7 +609,7 @@ ${timezone ? `- User Timezone: ${timezone}` : ''}
       const relevantContextText = allRelevantContext
         .map(msg => `- ${msg.content}`)
         .join('\n');
-      enhancedSystemPrompt = `${systemPrompt}\n\nRelevant Context from previous messages:\n${relevantContextText}`;
+      enhancedSystemPrompt = `${finalSystemPrompt}\n\nRelevant Context from previous messages:\n${relevantContextText}`;
     }
 
     const result = await generateText({

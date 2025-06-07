@@ -306,67 +306,23 @@ Includes automatic timezone conversion and lifecycle management for one-time tas
 1. **Create a new Supabase project** at [supabase.com](https://supabase.com)
 2. **Run this SQL in your SQL editor** to set up extensions, tables, and cron permissions:
 
-```sql
--- Enable required extensions
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS http;
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-
--- Create the messages table for conversation storage
-CREATE TABLE public.messages (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'system_routine_task')),
-  content TEXT NOT NULL,
-  chat_id TEXT,
-  embedding vector(1536),
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Enable row-level security
-ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
-
--- Create optimized vector index for similarity search
-CREATE INDEX ON public.messages USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- Grant cron permissions for scheduled tasks
-GRANT USAGE ON SCHEMA cron TO postgres;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA cron TO postgres;
-```
-
-### **Step 2: Set Up Environment Variables**
-
-In your Supabase dashboard, go to **Settings > Edge Functions** and add these environment variables:
-
-```
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-4o-mini
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-ZAPIER_MCP_URL=your_zapier_mcp_url (optional)
-TELEGRAM_ALLOWED_USERNAMES=your_telegram_username
-```
+https://github.com/supabase-community/natural-db/blob/main/supabase/migrations/001_create_initial_schema.sql
 
 ### **Step 3: Create the Edge Functions**
 
-Create three edge functions in your Supabase dashboard (**Edge Functions > Create Function**):
+Create three edge functions in your Supabase dashboard (**Edge Functions > Create Function -> Editor**):
 
 #### **Function 1: natural-db**
 
-```typescript
-[CODE PLACEHOLDER - natural-db function code will be provided here]
-```
+https://github.com/supabase-community/natural-db/blob/main/supabase/functions/natural-db/index.ts
 
 #### **Function 2: telegram-input**
 
-```typescript
-[CODE PLACEHOLDER - telegram-input function code will be provided here]
-```
+https://github.com/supabase-community/natural-db/blob/main/supabase/functions/telegram-input/index.ts
 
 #### **Function 3: telegram-outgoing**
 
-```typescript
-[CODE PLACEHOLDER - telegram-outgoing function code will be provided here]
-```
+https://github.com/supabase-community/natural-db/blob/main/supabase/functions/telegram-outgoing/index.ts
 
 #### **Shared Utilities: \_shared/db-utils.ts**
 

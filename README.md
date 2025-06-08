@@ -18,16 +18,18 @@ The assistant maintains two distinct behavioral layers:
 
 ### Natural Language to Data Transformation
 
-The core innovation is the LLM's ability to take messy, conversational input and automatically convert it into clean, structured data. When you tell your assistant "I spent $47 on groceries at Whole Foods yesterday, and I'm trying to keep my food budget under $400 this month," the LLM doesn't just acknowledge this—it structures and stores it:
+The core innovation is the LLM's ability to take messy, conversational input and automatically convert it into clean, structured data in your private database space. When you tell your assistant "I spent $47 on groceries at Whole Foods yesterday, and I'm trying to keep my food budget under $400 this month," the LLM doesn't just acknowledge this—it structures and stores it in your personal schema:
 
 ```sql
--- Auto-generated from natural language
+-- Auto-generated from natural language in your private schema (chat_12345)
 INSERT INTO expenses (amount, category, store, date, note)
 VALUES (47.00, 'groceries', 'Whole Foods', '2024-01-15', 'Monthly budget target: $400');
 
 INSERT INTO budget_goals (category, target_amount, period, status)
 VALUES ('food', 400.00, 'monthly', 'active');
 ```
+
+**Privacy Guarantee**: This data exists only in your private schema. Other users cannot access it, and the LLM cannot accidentally query it when helping other users.
 
 ### Web Search with Intelligent Storage
 
@@ -247,6 +249,27 @@ Through Zapier's MCP integration, your assistant can:
 These aren't just one-off actions—they're integrated into the data collection and analysis workflow.
 
 ## Technical Architecture
+
+### Database Schema Isolation
+
+Each chat operates in a completely isolated database environment:
+
+**Private Schemas**: Every chat gets its own PostgreSQL schema (`chat_{chat_id}`) where the LLM can create tables, store data, and perform operations without any risk of accessing other users' information.
+
+**System Table Protection**: Critical system tables (`messages`, `system_prompts`) remain in the `public` schema, completely inaccessible to the LLM. This ensures conversation history and scheduling data cannot be corrupted or accessed inappropriately.
+
+**Automatic Schema Creation**: When a chat first interacts with the database, the system automatically creates and configures the private schema with proper permissions.
+
+**Search Path Isolation**: The LLM's database connection is restricted to only its chat-specific schema and essential system schemas (like `extensions` for database functions), with no access to `public` or other chat schemas.
+
+**Complete Data Separation**:
+
+- Chat A's expense tracking tables are invisible to Chat B
+- Database queries cannot accidentally access other users' data
+- Schema-level isolation provides stronger security than row-level security
+- Each chat can create identically named tables without conflicts
+
+This architecture ensures that even if the LLM generates malicious SQL or has bugs, it cannot access data belonging to other users or critical system functions.
 
 ### Behavioral Architecture
 
@@ -495,11 +518,13 @@ The architecture is designed for gradual enhancement—you can start with simple
 **What makes this powerful**:
 
 - **Memory that grows**: Each interaction adds to a structured knowledge base
+- **Complete data isolation**: Each chat operates in its own private database schema
+- **Bulletproof security**: LLM cannot access other users' data or system tables
 - **Consistent base behavior**: Core functionality remains reliable across all interactions
 - **Personalized communication**: Adapts personality and style to individual user preferences
 - **Autonomous intelligence**: Scheduled analysis that builds insights over time
 - **Real-world integration**: Actions in email, calendar, and hundreds of other tools
 - **Multi-step reasoning**: Complex queries that span multiple data sources
-- **Complete ownership**: Your data stays in your database under your control
+- **Complete ownership**: Your data stays in your private schema under your control
 
 This isn't just another chatbot—it's a persistent AI companion that accumulates knowledge and takes action on your behalf, getting more useful the longer you use it.

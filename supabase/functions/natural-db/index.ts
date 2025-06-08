@@ -6,23 +6,24 @@ import {
   convertBigIntsToStrings,
   loadRecentAndRelevantMessages,
   insertMessage,
-  generateEmbedding
+  generateEmbedding,
+  getChatSchemaDetails
 } from "../_shared/db-utils.ts";
 import { createClient } from "npm:@supabase/supabase-js";
 
 /**
- * Simple AI DB Handler - Public Schema Only
+ * AI DB Handler with Chat-Specific Schema Isolation
  *
- * This handler operates only within the public PostgreSQL schema.
- * It provides SQL execution, scheduling capabilities, and now handles
- * message insertion and retrieval for all platforms.
+ * This handler creates isolated schemas for each chat_id, providing secure
+ * database operations while protecting system tables in the public schema.
  *
  * Architecture:
- * - Always operates within the public schema
- * - Handles message persistence and retrieval
- * - Provides SQL execution and scheduling capabilities
- * - No vector search or embedding functionality in tools (handled internally)
- * - Passes through metadata without requiring specific fields
+ * - Creates chat-specific schemas (chat_{chat_id}) for LLM operations
+ * - System tables (messages, system_prompts) remain in public schema
+ * - LLM has no access to public schema or other chats' schemas
+ * - Provides SQL execution, scheduling capabilities, and message handling
+ * - Vector search and embedding functionality handled internally
+ * - Each chat operates in complete isolation from others
  */
 
 // Environment Variables
@@ -46,53 +47,32 @@ const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 const MAX_CHAT_HISTORY = 10;
 const MAX_RELEVANT_MESSAGES = 5;
 
-async function getActiveCronJobDetails() {
+async function getActiveCronJobDetails(chatId: string | number) {
   const result = await executeSQL(
-    "SELECT jobname, schedule FROM cron.job WHERE active = true ORDER BY jobname;"
+    `SELECT jobname, schedule FROM cron.job WHERE active = true AND (jobname LIKE 'one_off_${chatId}_%' OR jobname LIKE 'cron_${chatId}_%') ORDER BY jobname;`,
+    chatId
   );
   return result.error ? result : { result: result.result };
 }
 
-async function getPublicSchemaDetails() {
-  const query = `
-    SELECT jsonb_agg(row_to_json(info)) as columns
-    FROM (
-        SELECT
-            isc.table_name,
-            isc.column_name,
-            isc.data_type,
-            isc.udt_name,
-            obj_description(pgc.oid) as table_comment,
-            col_description(pgc.oid, isc.ordinal_position) as column_comment
-        FROM
-            information_schema.columns isc
-        LEFT JOIN pg_class pgc ON pgc.relname = isc.table_name
-        LEFT JOIN pg_namespace pgn ON pgn.oid = pgc.relnamespace AND pgn.nspname = isc.table_schema
-        WHERE
-            isc.table_schema = 'public'
-        ORDER BY
-            isc.table_name,
-            isc.ordinal_position
-    ) AS info;
-  `;
-
-  const operationResult = await executeSQL(query);
+async function getChatSchemaDetailsFormatted(chatId: string | number) {
+  const operationResult = await getChatSchemaDetails(chatId);
 
   if (operationResult.error) {
     return {
-      error: `Failed to fetch public schema details: ${operationResult.error}`,
+      error: `Failed to fetch chat schema details: ${operationResult.error}`,
     };
   }
 
   const schemaContents = operationResult.result.length > 0 ? operationResult.result[0] : null;
   if (!schemaContents?.columns || schemaContents.columns.length === 0) {
     return {
-      schemaDetails: `Public schema exists but contains no tables/columns yet.`,
+      schemaDetails: `Your private database schema is ready but contains no tables yet. You can create tables as needed.`,
     };
   }
 
   const schemaData = schemaContents.columns;
-  let formattedString = `\nDetails of the current database schema ('public'):\n`;
+  let formattedString = `\nDetails of your private database schema:\n`;
   const tables: any = {};
 
   schemaData.forEach((col: any) => {
@@ -297,12 +277,12 @@ Deno.serve(async (req) => {
 
     const tools = {
       execute_sql: tool({
-        description: `Executes SQL within the public schema. Create tables directly (e.g., CREATE TABLE my_notes). Escape single quotes ('') in string literals.`,
+        description: `Executes SQL within your private schema. Create tables directly (e.g., CREATE TABLE my_notes). Escape single quotes ('') in string literals. You have full control over this isolated database space.`,
         parameters: z.object({
           query: z.string().describe("SQL query (DML/DDL)."),
         }),
         execute: async ({ query }) => {
-          const result = await executeSQL(query);
+          const result = await executeSQL(query, id);
           if (result.error) {
             return { error: result.error };
           }
@@ -322,7 +302,7 @@ Deno.serve(async (req) => {
       }),
 
       get_distinct_column_values: tool({
-        description: `Retrieves distinct values for a column within the public schema. Use for columns with discrete values (e.g., status, category) rather than freeform text.`,
+        description: `Retrieves distinct values for a column within your private schema. Use for columns with discrete values (e.g., status, category) rather than freeform text.`,
         parameters: z.object({
           table_name: z.string().describe("Table name."),
           column_name: z.string().describe("Column name."),
@@ -335,7 +315,7 @@ Deno.serve(async (req) => {
           }
 
           const query = `SELECT DISTINCT "${column_name}" FROM ${table_name};`;
-          const result = await executeSQL(query);
+          const result = await executeSQL(query, id);
 
           if (result.error) {
             return { error: result.error };
@@ -406,7 +386,7 @@ Deno.serve(async (req) => {
             sqlCommand = `SELECT cron.schedule('${finalJobName}', '${schedule_expression}', $$ SELECT net.http_post(url := '${cronCallbackUrl}', body := '${escapedPayload}'::jsonb, headers := '{"Content-Type": "application/json"}'::jsonb) $$);`;
           }
 
-          const scheduleResult = await executeSQL(sqlCommand);
+          const scheduleResult = await executeSQL(sqlCommand, id);
           if (scheduleResult.error) {
             return { error: scheduleResult.error };
           }
@@ -417,6 +397,33 @@ Deno.serve(async (req) => {
           } else {
             return { error: "Failed to schedule job: No confirmation from cron.schedule." };
           }
+        },
+      }),
+
+      unschedule_prompt: tool({
+        description: "Unschedules a previously scheduled job by its job name. Use this to cancel or remove scheduled tasks.",
+        parameters: z.object({
+          job_name: z.string().describe("The name of the job to unschedule (from schedule_prompt or visible in scheduled routines)."),
+        }),
+        execute: async ({ job_name }) => {
+          if (!job_name) {
+            return { error: "Job name is required for unscheduling." };
+          }
+
+          // Validate job name format to prevent SQL injection
+          const jobNameRegex = /^[a-zA-Z0-9_]+$/;
+          if (!jobNameRegex.test(job_name)) {
+            return { error: "Invalid job name format. Job names should contain only letters, numbers, and underscores." };
+          }
+
+          const sqlCommand = `SELECT cron.unschedule('${job_name}');`;
+          
+          const unscheduleResult = await executeSQL(sqlCommand, id);
+          if (unscheduleResult.error) {
+            return { error: unscheduleResult.error };
+          }
+
+          return `Job '${job_name}' has been successfully unscheduled and removed.`;
         },
       }),
 
@@ -458,7 +465,7 @@ Deno.serve(async (req) => {
             LIMIT 10
           `;
           
-          const result = await executeSQL(query);
+          const result = await executeSQL(query, id);
           
           if (result.error) {
             return { error: result.error };
@@ -472,8 +479,8 @@ Deno.serve(async (req) => {
     };
 
     // Get schema and cron job details
-    let formattedSchemaDetails = `You are operating within the public PostgreSQL schema.`;
-    const schemaResult = await getPublicSchemaDetails();
+    let formattedSchemaDetails = `You are operating within your own private database schema.`;
+    const schemaResult = await getChatSchemaDetailsFormatted(id);
     if (schemaResult.error) {
       formattedSchemaDetails += `\n(Could not fetch schema details: ${schemaResult.error})`;
     } else if (typeof schemaResult.schemaDetails === "string") {
@@ -482,7 +489,7 @@ Deno.serve(async (req) => {
 
     let activeCronJobsString = "No routines currently scheduled.\n";
     try {
-      const cronJobsResult = await getActiveCronJobDetails();
+      const cronJobsResult = await getActiveCronJobDetails(id);
       if (cronJobsResult.error) {
         activeCronJobsString = `Note: Error fetching scheduled routines: ${cronJobsResult.error}`;
       } else if (cronJobsResult.result && cronJobsResult.result.length > 0) {
@@ -500,38 +507,38 @@ Deno.serve(async (req) => {
     // Get custom system prompt from database
     const customSystemPrompt = await getCurrentSystemPrompt(id);
     
-    const baseSystemPrompt = `BASE BEHAVIOR:You are a highly organized personal assistant who .
+    const baseSystemPrompt = `BASE BEHAVIOR: You are a highly organized personal assistant with your own private database workspace.
 
-Database Structure:
+Private Database Schema:
 ${formattedSchemaDetails}
 
 Scheduled Routines:
 ${activeCronJobsString}
 
 Core Responsibilities:
-- SQL Execution: Use 'execute_sql' for all DB operations within public schema. Escape quotes ('').
-- Table Management: Before creating tables, check if existing ones could serve the purpose.
-- Data Workflow: CREATE TABLE → Add comments → Enable RLS → Insert data
+- SQL Execution: Use 'execute_sql' for all DB operations within your private schema. Escape quotes ('').
+- Table Management: Before creating new tables, check if existing ones could serve the purpose
+- Data Workflow: CREATE TABLE → Add comments → Insert data (RLS not needed in private schema)
 - Column Discovery: Use 'get_distinct_column_values' before filtering discrete value columns (status, category) not freeform text.
 - Avoid Duplicates: Only insert each piece of data once.
 
 Table Creation Workflow:
 1. CREATE TABLE with descriptive names: CREATE TABLE my_tasks (id UUID PRIMARY KEY, task TEXT, due_date TIMESTAMPTZ)
 2. Add documentation: COMMENT ON TABLE my_tasks IS 'User task tracking'; COMMENT ON COLUMN my_tasks.task IS 'Task description'
-3. Enable security: ALTER TABLE my_tasks ENABLE ROW LEVEL SECURITY
-4. Insert data: INSERT INTO my_tasks VALUES (gen_random_uuid(), 'Task name', '2024-01-01T10:00:00Z')
+3. Insert data: INSERT INTO my_tasks VALUES (gen_random_uuid(), 'Task name', '2024-01-01T10:00:00Z')
 
 Column Value Strategy:
 - Before filtering (WHERE status = 'completed'), use get_distinct_column_values to see available values
 - Use closest semantic match if exact value not found and explain the substitution
 - For freeform text columns, use LIKE/ILIKE instead
 
-Scheduling (schedule_prompt tool):
+Scheduling (schedule_prompt & unschedule_prompt tools):
 - Use ONLY for future actions/reminders, not current queries
 - prompt_to_schedule: Directive FOR YOU (e.g., "Remind about meeting", "Check task completion")
 - NOT user messages (e.g., "Your meeting is now!" ❌)
 - ISO timestamps for one-off (2024-07-15T10:00:00Z), cron for recurring (0 9 * * MON)
 - job_name: Descriptive suffix for tracking
+- Use unschedule_prompt to cancel/remove scheduled jobs when no longer needed
 
 System Routine Tasks:
 When receiving system_routine_task:

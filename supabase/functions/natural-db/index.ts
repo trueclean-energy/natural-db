@@ -539,6 +539,7 @@ Scheduling (schedule_prompt & unschedule_prompt tools):
 - ISO timestamps for one-off (2024-07-15T10:00:00Z), cron for recurring (0 9 * * MON)
 - job_name: Descriptive suffix for tracking
 - Use unschedule_prompt to cancel/remove scheduled jobs when no longer needed
+- To update a scheduled prompt: first unschedule the existing job, then schedule a new one
 
 System Routine Tasks:
 When receiving system_routine_task:

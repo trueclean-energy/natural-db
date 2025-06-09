@@ -428,9 +428,9 @@ Deno.serve(async (req) => {
       }),
 
       update_system_prompt: tool({
-        description: "Updates the system prompt that defines the assistant's behavior, personality, and capabilities. Use this when the user wants to change how the assistant behaves or responds.",
+        description: "Updates ONLY the personalized behavior section of the system prompt. The base system behavior (database operations, scheduling, etc.) never changes. Use this when the user wants to customize personality, communication style, or add specific behavioral preferences.",
         parameters: z.object({
-          new_system_prompt: z.string().describe("The new system prompt content that will define the assistant's behavior."),
+          new_system_prompt: z.string().describe("ONLY the personalized behavior additions/changes - NOT the entire system prompt. Focus on personality, communication style, or specific user preferences. The base database and scheduling behavior remains unchanged."),
           description: z.string().describe("Brief description of what this prompt change accomplishes or why it was made."),
         }),
         execute: async ({ new_system_prompt, description }) => {

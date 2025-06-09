@@ -1,10 +1,8 @@
 # Building an AI Personal Assistant with Supabase: Persistent Memory & Autonomous Intelligence
 
-Large Language Models excel at understanding natural language but struggle with maintaining accurate, structured data across conversations. This system enhances LLMs by combining their natural language processing capabilities with PostgreSQL storage, creating an AI that maintains precise, queryable records over time.
+Large Language Models excel at natural language understanding but struggle with maintaining structured data across conversations. This system enhances LLMs by combining their natural language processing with PostgreSQL storage, creating an AI that maintains precise, queryable records over time. The assistant converts conversations into structured database entries, enabling reliable data retrieval and analysis through database operations, scheduled prompts, web searches, and MCP integrations.
 
-The assistant converts conversations into structured database entries, enabling reliable data retrieval and analysis. By integrating database operations, scheduled prompts, web searches, and MCP integrations, it creates a flexible system that can automate complex workflows. Unlike traditional AI assistants that rely solely on conversation history, this system maintains organized, structured data that can be precisely queried and analyzed for accurate insights.
-
-**The Flexibility**: The modular architecture lets you start simple (expense tracking) and gradually add complexity (investment monitoring, health tracking, project management) as your needs evolve. Each component works independently but combines powerfully—scheduled analysis can trigger web searches that update your database and send notifications through Zapier integrations.
+The system's power comes from how its core components work together: database operations store structured data, scheduled tasks trigger analysis cycles, web searches gather real-time information, and MCP integrations enable real-world actions. This creates a flexible foundation that starts simple (like tracking expenses) and can evolve into complex workflows (like automated investment monitoring). For example, a scheduled task might analyze your portfolio, trigger web searches for market trends, update your database with new insights, and send personalized reports through Zapier—all while maintaining organized, queryable data that improves with each cycle.
 
 ## Core Pieces
 
@@ -101,78 +99,45 @@ As the codebase owner, you have complete control over your assistant's capabilit
 
 ## Use Cases
 
-### Automated Investment Research
-
-**Setup**: "Every Sunday, research top 3 performing tech stocks and email me"
-
-1. **Cron trigger** executes weekly with stored prompt
-2. **Web search** finds current top performing tech stocks and market analysis
-3. **Database storage** creates/updates `stock_performance` table with new data
-4. **Database lookup** retrieves historical performance for trend analysis
-5. **MCP integration** sends formatted email report via Zapier with:
-   - Current top performers
-   - Week-over-week changes
-   - Market context and insights
-6. **Memory building** enables future queries about stock performance history
-
-### Smart Expense Tracking
-
-**Setup**: Forward receipts via email, set monthly budgets
-
-1. **MCP integration** receives forwarded receipt emails
-2. **Web search** identifies store/merchant details if needed
-3. **Database storage** creates/updates `expenses` table with:
-   - Amount, date, category
-   - Store/merchant details
-   - Receipt image reference
-4. **Database lookup** compares against budget thresholds
-5. **Telegram notifications** sent when:
-   - Category exceeds 80% of budget
-   - Unusual spending patterns detected
-   - Monthly summary ready
-
-### Learning Progress Tracker
-
-**Setup**: "Track my coding practice and remind me when I'm slacking"
-
-1. **Database storage** creates `coding_sessions` table to track:
-   - Session duration
-   - Topics covered
-   - Difficulty level
-   - Completion status
-2. **Database lookup** analyzes:
-   - Frequency of practice
-   - Topic coverage gaps
-   - Progress patterns
-3. **Cron trigger** runs weekly analysis
-4. **MCP integration** sends:
-   - Progress reports
-   - Topic recommendations
-   - Practice reminders when activity drops
-
 ### Health & Fitness Monitoring
 
 **Setup**: Create daily workout plans and track progress with daily check-ins
 
-1. **Database storage** creates:
-   - `workout_plans` table for daily exercise routines
-   - `workout_results` table tracking:
-     - Exercise type
-     - Duration/intensity
-     - Personal records
-     - How you felt
-2. **Daily check-ins** via cron:
-   - Morning: Review today's planned workout
-   - Evening: Log workout results
-   - Compare actual vs planned performance
-3. **Database lookup** analyzes:
-   - Progress trends
-   - Recovery patterns
-   - Goal alignment
-4. **Monthly celebrations** via cron:
-   - Review monthly achievements
-   - Update personal records
-   - Adjust workout plans based on progress
+1. **Database storage** creates workout_plans and workout_results tables to track exercise routines, performance metrics, and personal records
+2. **Daily check-ins** via cron handle morning workout reviews and evening performance logging
+3. **Database lookup** analyzes progress trends, recovery patterns, and goal alignment
+4. **Monthly celebrations** via cron review achievements and adjust workout plans accordingly
+
+### Personal Recipe & Meal Planning
+
+**Setup**: "Track what I cook, suggest meals based on dietary preferences and ingredients I have"
+
+1. **Database storage** creates `recipes`, `ingredients`, `meal_history`, and `meal_ratings` tables to track cooking experiences, dietary restrictions, ingredient preferences, and meal satisfaction
+2. **Web search** finds new recipes based on available ingredients and dietary goals
+3. **Database lookup** analyzes cooking patterns, favorite cuisines, nutritional balance, and meal ratings
+4. **Cron trigger** runs weekly to suggest meal prep plans and grocery lists
+5. **Telegram notifications** sends daily meal suggestions, cooking reminders, weekly grocery lists based on planned meals, and evening meal rating prompts
+6. **Daily rating system** collects user feedback on each meal through Telegram, storing ratings and comments to improve future meal suggestions
+
+### Travel Planning & Experience Tracking
+
+**Setup**: "Help me research destinations and track my travel experiences"
+
+1. **Database storage** creates `destinations`, `trip_plans`, and `travel_experiences` tables to store research findings, itineraries, and post-trip reflections
+2. **Web search** finds destination information, flight deals, and local recommendations based on travel preferences
+3. **Database lookup** analyzes past trip satisfaction, budget patterns, and preferred activities
+4. **Cron trigger** runs monthly to suggest new destinations and seasonal travel deals
+5. **MCP integration** automatically adds trip dates to calendar and sends pre-trip reminders with personalized packing lists and local tips
+
+### Interest-Based Article Bookmarker
+
+**Setup**: "Track articles about AI and climate change, remind me of important ones I haven't read"
+
+1. **Database storage** creates `articles` table to store article metadata, user interests, read status, and relevance score
+2. **Web search** daily finds new articles matching user interests
+3. **Database lookup** analyzes reading patterns and article engagement
+4. **Cron trigger** runs weekly to identify top unread articles by relevance
+5. **Telegram notifications** sends personalized weekly digest with must-read articles based on interests
 
 ## Implementation Guide
 
@@ -183,7 +148,7 @@ As the codebase owner, you have complete control over your assistant's capabilit
 - Telegram bot token
 - Zapier account (optional)
 
-### **Step 1: Database Setup**
+### Step 1: Database Setup
 
 Run the migration SQL in your Supabase SQL editor: [migration.sql](link-to-migration-file)
 
@@ -191,7 +156,7 @@ Run the migration SQL in your Supabase SQL editor: [migration.sql](link-to-migra
 - Creates system tables with proper permissions
 - Configures cron job scheduling
 
-### **Step 2: Edge Functions**
+### Step 2: Edge Functions
 
 Create three functions in Supabase dashboard:
 
@@ -207,12 +172,28 @@ Create three functions in Supabase dashboard:
 
 - [telegram-outgoing/index.ts](link-to-telegram-outgoing-function)
 
-### **Step 3: Telegram Bot**
+### Step 3: Telegram Bot
 
 1. Create bot via [@BotFather](https://t.me/botfather)
 2. Set webhook: `https://api.telegram.org/bot[TOKEN]/setWebhook?url=https://[PROJECT].supabase.co/functions/v1/telegram-input`
 
-### **Step 4: Test Integration**
+### Step 4: Environment Variables
+
+Set the following environment variables in your Supabase project settings (Project Settings → Edge Functions):
+
+#### Required Variables:
+
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
+
+#### Optional Variables:
+
+- `OPENAI_MODEL`: OpenAI model to use (defaults to "gpt-4.1-mini")
+- `TELEGRAM_WEBHOOK_SECRET`: Secret token for webhook validation
+- `TELEGRAM_ALLOWED_USERNAMES`: Comma-separated list of allowed Telegram usernames
+- `ZAPIER_MCP_URL`: MCP server URL for Zapier integrations
+
+### Step 5: Test Integration
 
 Try these commands with your bot:
 
@@ -237,18 +218,18 @@ Based on 10 messages per day (300 messages/month):
 
 - **Supabase**: Free tier (500MB database, 2GB bandwidth) - $0/month
 - **OpenAI GPT-4.1-mini**: $0.40 per 1M input tokens, $1.60 per 1M output tokens
-  - Average 400 input + 600 output tokens per message
-  - Input: 300 messages × 400 tokens × $0.40/1M = $0.048/month
-  - Output: 300 messages × 600 tokens × $1.60/1M = $0.288/month
-  - Total OpenAI: $0.336/month
+  - Average 1200 input + 800 output tokens per message
+  - Input: 300 messages × 1200 tokens × $0.40/1M = $0.144/month
+  - Output: 300 messages × 800 tokens × $1.60/1M = $0.384/month
+  - Total OpenAI: $0.53/month
 - **Telegram**: Free API usage
 - **Zapier**: Free tier (300 tasks/month) - $0/month
 - **Vector Embeddings**: $0.02 per 1M tokens (text-embedding-3-small)
-  - 300 messages × 400 tokens × $0.02/1M = $0.0024/month
+  - 300 messages × 1200 tokens × $0.02/1M = $0.0072/month
 
-**Total monthly cost: ~$0.34**
+**Total monthly cost: ~$0.54**
 
-Note: Costs scale linearly with usage. At 100 messages/day (~3K messages/month), expect ~$3.40/month.
+Note: Costs scale linearly with usage. At 100 messages/day (~3K messages/month), expect ~$5.40/month.
 
 ## Summary
 
@@ -261,6 +242,5 @@ This system leverages what LLMs do best—understanding natural language and tra
 - **Autonomous Intelligence**: Scheduled operations create self-improving analysis loops
 - **Real-world Integration**: Actions across email, calendar, and hundreds of tools
 - **Adaptive Personality**: Evolving communication style based on user preferences
-- **Modular Growth**: Start simple, add complexity as needs evolve
 
 This isn't just another chatbot—it's a persistent AI companion that accumulates knowledge and takes autonomous action, becoming more valuable the longer you use it.

@@ -2,7 +2,14 @@
 
 Large Language Models excel at natural language understanding but struggle with maintaining structured data across conversations. This system enhances LLMs by combining their natural language processing with PostgreSQL storage, creating an AI that maintains precise, queryable records over time. The assistant converts conversations into structured database entries, enabling reliable data retrieval and analysis through database operations, scheduled prompts, web searches, and MCP integrations.
 
-The system's power comes from how its core components work together: database operations store structured data, scheduled tasks trigger analysis cycles, web searches gather real-time information, and MCP integrations enable real-world actions. This creates a flexible foundation that starts simple (like tracking expenses) and can evolve into complex workflows (like automated investment monitoring). For example, a scheduled task might analyze your portfolio, trigger web searches for market trends, update your database with new insights, and send personalized reports through Zapier—all while maintaining organized, queryable data that improves with each cycle.
+The system's power comes from how its core components work together: database operations store structured data, scheduled tasks create autonomy, web searches gather real-time information, and MCP integrations enable real-world actions. This creates a flexible foundation that starts simple (like tracking expenses) and can evolve into complex workflows (like automated investment monitoring). For example, a scheduled task might analyze your portfolio, trigger web searches for market trends, update your database with new insights, and send personalized reports through Zapier—all while maintaining organized, queryable data that improves with each cycle.
+
+<video className="rounded-sm m-0" autoPlay loop muted>
+  <source
+    src="https://xguihxuzqibwxjnimxev.supabase.co/storage/v1/object/public/videos/marketing/blog/natural-db/natural-db-demo-combined.mp4"
+    type="video/mp4"
+  />
+</video>
 
 ## Core Pieces
 
@@ -17,15 +24,15 @@ Each chat operates in a completely isolated PostgreSQL schema (`chat_{chat_id}`)
 
 ```sql
 -- Auto-generated from natural language in your private schema
-CREATE TABLE expenses (
-  id UUID PRIMARY KEY,
-  amount DECIMAL,
-  category TEXT,
-  date TIMESTAMPTZ DEFAULT NOW()
+create table expenses (
+  id uuid primary key,
+  amount decimal,
+  category text,
+  date timestamptz default NOW()
 );
 
-INSERT INTO expenses (amount, category, store, date, note)
-VALUES (47.00, 'groceries', 'Whole Foods', '2024-01-15', 'Monthly budget target: $400');
+insert into expenses (amount, category, store, date, note)
+values (47.00, 'groceries', 'Whole Foods', '2024-01-15', 'Monthly budget target: $400');
 ```
 
 ### Messages Context
@@ -35,9 +42,9 @@ Two complementary memory types maintain conversation continuity:
 - **Semantic Memory (Vector Search)**: Stores conversation embeddings using pgvector for fuzzy concept retrieval ("that productivity thing we talked about last month")
 - **Structured Memory (SQL Data)**: Stores concrete facts in LLM-created tables for precise queries ("How much did I spend on coffee last quarter?")
 
-### Scheduled Prompts Creating Intelligence Loops
+### Scheduled Prompts
 
-The system's power emerges through autonomous scheduled operations that combine all other pieces:
+The system's autonomy emerges through scheduled prompts via pg_cron that can make use of all other pieces:
 
 **Example**: "Every Sunday at 6 PM, analyze my portfolio performance and research market trends"
 
@@ -47,8 +54,6 @@ The system's power emerges through autonomous scheduled operations that combine 
 4. **Database storage** accumulates weekly performance data and market insights
 5. **MCP integration** sends personalized report via Zapier with portfolio highlights and recommendations
 6. **Memory building** enables future queries like "How has my portfolio performed compared to market trends?"
-
-This creates self-reinforcing intelligence loops where scheduled analysis builds knowledge that improves future responses.
 
 ### Web Search
 
@@ -99,14 +104,16 @@ As the codebase owner, you have complete control over your assistant's capabilit
 
 ## Use Cases
 
-### Health & Fitness Monitoring
+### Run Tracking
 
-**Setup**: Create daily workout plans and track progress with daily check-ins
+![Run tracking dashboard showing activity history and statistics](/images/blog/2025-06-10-natural-db/runs.png)
 
-1. **Database storage** creates workout_plans and workout_results tables to track exercise routines, performance metrics, and personal records
-2. **Daily check-ins** via cron handle morning workout reviews and evening performance logging
-3. **Database lookup** analyzes progress trends, recovery patterns, and goal alignment
-4. **Monthly celebrations** via cron review achievements and adjust workout plans accordingly
+**Setup**: Track running activities and maintain consistent training schedule
+
+1. **Database storage** creates `runs` table to store distance, duration, route, weather conditions, and personal notes for each run
+2. **Daily reminders** via cron check last run date and send personalized Telegram notifications with previous run details to encourage consistency
+3. **Run logging** allows users to record new runs through Telegram, automatically calculating pace and updating personal records
+4. **Monthly summaries** via cron analyze running patterns, highlight achievements, and suggest training adjustments based on progress
 
 ### Personal Recipe & Meal Planning
 
@@ -150,7 +157,7 @@ As the codebase owner, you have complete control over your assistant's capabilit
 
 ### Step 1: Database Setup
 
-Run the migration SQL in your Supabase SQL editor: [migration.sql](link-to-migration-file)
+Run the migration SQL in your Supabase SQL editor: [migration.sql](https://github.com/supabase-community/natural-db/blob/main/supabase/migrations/001_create_initial_schema.sql)
 
 - Sets up extensions (pgvector, pg_cron)
 - Creates system tables with proper permissions
@@ -162,15 +169,16 @@ Create three functions in Supabase dashboard:
 
 **natural-db**: Main AI brain handling all processing, database operations, scheduling, and tool integration
 
-- [natural-db/index.ts](link-to-natural-db-function)
+- [natural-db/index.ts](https://github.com/supabase-community/natural-db/blob/main/supabase/functions/natural-db/index.ts)
+- [natural-db/db-utils.ts](https://github.com/supabase-community/natural-db/blob/main/supabase/functions/natural-db/db-utils.ts)
 
 **telegram-input**: Webhook handler for incoming messages with user validation and timezone management
 
-- [telegram-input/index.ts](link-to-telegram-input-function)
+- [telegram-input/index.ts](https://github.com/supabase-community/natural-db/blob/main/supabase/functions/telegram-input/index.ts)
 
 **telegram-outgoing**: Response formatter and delivery handler with error management
 
-- [telegram-outgoing/index.ts](link-to-telegram-outgoing-function)
+- [telegram-outgoing/index.ts](https://github.com/supabase-community/natural-db/blob/main/supabase/functions/telegram-outgoing/index.ts)
 
 ### Step 3: Telegram Bot
 
@@ -181,12 +189,12 @@ Create three functions in Supabase dashboard:
 
 Set the following environment variables in your Supabase project settings (Project Settings → Edge Functions):
 
-#### Required Variables:
+##### Required Variables:
 
 - `OPENAI_API_KEY`: Your OpenAI API key
 - `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
 
-#### Optional Variables:
+##### Optional Variables:
 
 - `OPENAI_MODEL`: OpenAI model to use (defaults to "gpt-4.1-mini")
 - `TELEGRAM_WEBHOOK_SECRET`: Secret token for webhook validation

@@ -8,7 +8,7 @@ import {
   insertMessage,
   generateEmbedding,
   getChatSchemaDetails
-} from "../_shared/db-utils.ts";
+} from "./db-utils.ts";
 import { createClient } from "npm:@supabase/supabase-js";
 
 /**

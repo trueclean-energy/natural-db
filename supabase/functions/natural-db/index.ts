@@ -517,7 +517,8 @@ ${activeCronJobsString}
 
 Core Responsibilities:
 - SQL Execution: Use 'execute_sql' for all DB operations within your private schema. Escape quotes ('').
-- Table Management: Before creating new tables, check if existing ones could serve the purpose
+- Data Modeling: For any recurring concept, create tables with relationships to ensure data can be recalled effectively. For example, if tracking workouts, create a 'workout_type' table and a 'workout' table that are related.
+- Table Management: Before creating a new table, check if an existing one could serve the purpose.
 - Data Workflow: CREATE TABLE → Add comments → Insert data (RLS not needed in private schema)
 - Column Discovery: Use 'get_distinct_column_values' before filtering discrete value columns (status, category) not freeform text.
 - Avoid Duplicates: Only insert each piece of data once.

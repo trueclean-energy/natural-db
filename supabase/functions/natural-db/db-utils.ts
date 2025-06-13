@@ -83,10 +83,12 @@ async function ensureChatSchema(connection: any, chatId: string | number): Promi
       // Create schema if it doesn't exist
       await connection.queryObject(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
       
+      // REVOKE any default PUBLIC privileges on this new schema
+      await connection.queryObject(`REVOKE ALL ON SCHEMA "${schemaName}" FROM PUBLIC;`);
+      
       // Grant necessary permissions for the schema
       // The current database user should have full access to the schema they create
-      await connection.queryObject(`GRANT USAGE ON SCHEMA "${schemaName}" TO CURRENT_USER`);
-      await connection.queryObject(`GRANT CREATE ON SCHEMA "${schemaName}" TO CURRENT_USER`);
+      await connection.queryObject(`GRANT USAGE, CREATE ON SCHEMA "${schemaName}" TO CURRENT_USER`);
       
       console.log(`Created schema: ${schemaName}`);
     }
@@ -98,6 +100,41 @@ async function ensureChatSchema(connection: any, chatId: string | number): Promi
   }
 }
 
+// Ensure a dedicated Postgres role exists for this schema and that the
+// current (service) user can SET ROLE to it. The role receives privileges
+// *only* for objects inside the chat schema.
+async function ensureChatRole(connection: any, schemaName: string): Promise<{ roleName: string; password: string }> {
+  const roleName = `${schemaName}_role`;
+  // Generate a fresh random password each time. Short-lived (lives only for this request)
+  const password = crypto.randomUUID();
+
+  try {
+    // 1. Create role if it does not exist
+    await connection.queryObject(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
+          EXECUTE format('CREATE ROLE %I LOGIN NOINHERIT PASSWORD %L;', '${roleName}', '${password}');
+        END IF;
+      END$$;`);
+
+    // 2. If role existed, still set fresh password (makes creds single-use)
+    await connection.queryObject(`ALTER ROLE "${roleName}" LOGIN NOINHERIT PASSWORD '${password}';`);
+
+    // 3. Grant privileges inside its schema only
+    await connection.queryObject(`GRANT USAGE, CREATE ON SCHEMA "${schemaName}" TO "${roleName}";`);
+    await connection.queryObject(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schemaName}" GRANT ALL PRIVILEGES ON TABLES TO "${roleName}";`);
+    await connection.queryObject(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schemaName}" GRANT ALL PRIVILEGES ON SEQUENCES TO "${roleName}";`);
+    await connection.queryObject(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "${schemaName}" TO "${roleName}";`);
+    await connection.queryObject(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "${schemaName}" TO "${roleName}";`);
+
+    return { roleName, password };
+  } catch (error) {
+    console.error(`Error ensuring role ${roleName}:`, error);
+    throw error;
+  }
+}
+
 // Handle database operations for LLM (chat-specific schema only)
 async function handleLLMDbOperation(
   operationName: string,
@@ -105,34 +142,45 @@ async function handleLLMDbOperation(
   sqlLogic: (connection: any, schemaName: string) => Promise<any>
 ) {
   const dbPool = ensureDbPool();
-  let connection;
+  let adminConnection;
+  let chatConnection;
   
   try {
-    connection = await dbPool.connect();
-    
-    // Create and ensure chat schema exists
-    const schemaName = await ensureChatSchema(connection, chatId);
-    
-    // Set search path to ONLY the chat schema and essential system schemas
-    // Explicitly exclude public to prevent LLM from accessing system tables
-    await connection.queryObject(`SET search_path TO "${schemaName}", extensions, cron;`);
-    
-    const result = await sqlLogic(connection, schemaName);
+    // 1. Admin connection (service_role) to create schema/role as needed
+    adminConnection = await dbPool.connect();
+
+    const schemaName = await ensureChatSchema(adminConnection, chatId);
+    const { roleName, password } = await ensureChatRole(adminConnection, schemaName);
+
+    // 2. Build a connection string for the chat role
+    const supabaseDbUrl = Deno.env.get("SUPABASE_DB_URL");
+    if (!supabaseDbUrl) throw new Error("SUPABASE_DB_URL not set");
+
+    const dbUrl = new URL(supabaseDbUrl);
+    dbUrl.username = roleName;
+    dbUrl.password = password;
+    const chatDbConnStr = dbUrl.toString();
+
+    // 3. Connect as the isolated chat role (single connection)
+    chatConnection = new postgres.Client(chatDbConnStr);
+    await chatConnection.connect();
+
+    // Restrict search path explicitly (chat role technically only has privs in its schema, but be explicit)
+    await chatConnection.queryObject(`SET search_path TO "${schemaName}", extensions, cron;`);
+
+    const result = await sqlLogic(chatConnection, schemaName);
     return { result: convertBigIntsToStrings(result) };
   } catch (e: any) {
     console.error(`LLM operation error in ${operationName}:`, e);
     return {
-      error: `Execution failed for ${operationName}: ${e.message}${
-        e.fields?.code ? ` (Code: ${e.fields.code})` : ""
-      }`,
+      error: `Execution failed for ${operationName}: ${e.message}${ e.fields?.code ? ` (Code: ${e.fields.code})` : "" }`,
     };
   } finally {
-    if (connection) {
-      try {
-        connection.release();
-      } catch (releaseError) {
-        console.error(`Error releasing connection after ${operationName}:`, releaseError);
-      }
+    if (chatConnection) {
+      try { await chatConnection.end(); } catch (_) {}
+    }
+    if (adminConnection) {
+      try { adminConnection.release(); } catch (_) {}
     }
   }
 }
@@ -171,11 +219,20 @@ async function handleSystemDbOperation(
 }
 
 // LLM SQL execution - operates only within chat-specific schema
-export async function executeSQL(query: string, chatId: string | number) {
+export async function executeSQL(query: string, chatId: string | number, allowCron: boolean = false) {
   if (!chatId) {
     return { error: "Chat ID is required for SQL execution" };
   }
 
+  if (allowCron) {
+    // When allowed, run via service_role with public search_path.
+    return handleSystemDbOperation("execute_sql_admin", async (connection) => {
+      const result = await connection.queryObject(query);
+      return result.rows;
+    });
+  }
+
+  // All other queries run in isolated chat schema under chat role (no cron privileges).
   return handleLLMDbOperation("execute_sql", chatId, async (connection, schemaName) => {
     const result = await connection.queryObject(query);
     return result.rows;
@@ -233,9 +290,6 @@ export async function searchSimilarMessages(
   }
 
   const result = await handleSystemDbOperation("search_similar_messages", async (connection) => {
-    // Set IVFFlat probes for better recall (balances speed vs accuracy)
-    await connection.queryObject("SET ivfflat.probes = 3;");
-    
     // Use parameterized query to safely pass the embedding vector
     const result = await connection.queryObject({
       text: `
@@ -335,7 +389,7 @@ export async function generateEmbedding(text: string) {
       model: openaiClient.embedding("text-embedding-3-small"),
       value: text,
     });
-    return `[${embedding.join(",")}]`;
+    return JSON.stringify(embedding);
   } catch (error) {
     console.error("Error generating embedding:", error);
     throw error;

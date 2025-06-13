@@ -32,6 +32,7 @@ const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
 const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
 const zapierMcpUrl = Deno.env.get("ZAPIER_MCP_URL");
+const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
 if (!supabaseUrl || !supabaseServiceRoleKey || !openaiApiKey) {
   throw new Error("Missing required environment variables");
@@ -47,10 +48,22 @@ const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 const MAX_CHAT_HISTORY = 10;
 const MAX_RELEVANT_MESSAGES = 5;
 
+// Zod schema for validating incoming edge-function payload
+const IncomingPayloadSchema = z.object({
+  userPrompt: z.string().min(1),
+  id: z.union([z.string(), z.number()]),
+  userId: z.string().uuid().or(z.string()), // allow uuid but keep generic string fallback
+  metadata: z.record(z.any()).optional(),
+  timezone: z.string().nullable().optional(),
+  incomingMessageRole: z.enum(["user", "assistant", "system", "system_routine_task"]),
+  callbackUrl: z.string().url(),
+});
+
 async function getActiveCronJobDetails(chatId: string | number) {
   const result = await executeSQL(
     `SELECT jobname, schedule FROM cron.job WHERE active = true AND (jobname LIKE 'one_off_${chatId}_%' OR jobname LIKE 'cron_${chatId}_%') ORDER BY jobname;`,
-    chatId
+    chatId,
+    true
   );
   return result.error ? result : { result: result.result };
 }
@@ -211,7 +224,13 @@ Deno.serve(async (req) => {
   let mcpClient: any = null;
 
   try {
-    const body = await req.json();
+    const raw = await req.json();
+    const parsed = IncomingPayloadSchema.safeParse(raw);
+    if (!parsed.success) {
+      console.error("Invalid request body:", parsed.error);
+      return new Response("Invalid request body", { status: 400 });
+    }
+
     const {
       userPrompt,
       id,
@@ -219,11 +238,29 @@ Deno.serve(async (req) => {
       metadata = {},
       timezone,
       incomingMessageRole,
-      callbackUrl
-    } = body;
+      callbackUrl,
+    } = parsed.data;
 
-    if (!userPrompt || !id || !userId || !incomingMessageRole || !callbackUrl) {
-      return new Response("Invalid request body", { status: 400 });
+    // Authorization Gate: Verify the user is a member of the chat.
+    try {
+      const { data: membership, error } = await supabase
+        .from("chat_users")
+        .select("user_id")
+        .eq("chat_id", id.toString())
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (error) {
+        throw new Error(`Database error during membership check: ${error.message}`);
+      }
+
+      if (!membership) {
+        console.warn(`Attempted access by non-member. User: ${userId}, Chat: ${id}`);
+        return new Response("Forbidden: You are not a member of this chat.", { status: 403 });
+      }
+    } catch (e) {
+      console.error("Authorization gate failed:", e.message);
+      return new Response("Forbidden: Could not verify chat membership.", { status: 403 });
     }
 
     const cronCallbackUrl = `${supabaseUrl}/functions/v1/natural-db`;
@@ -386,7 +423,7 @@ Deno.serve(async (req) => {
             sqlCommand = `SELECT cron.schedule('${finalJobName}', '${schedule_expression}', $$ SELECT net.http_post(url := '${cronCallbackUrl}', body := '${escapedPayload}'::jsonb, headers := '{"Content-Type": "application/json"}'::jsonb) $$);`;
           }
 
-          const scheduleResult = await executeSQL(sqlCommand, id);
+          const scheduleResult = await executeSQL(sqlCommand, id, true);
           if (scheduleResult.error) {
             return { error: scheduleResult.error };
           }
@@ -418,7 +455,7 @@ Deno.serve(async (req) => {
 
           const sqlCommand = `SELECT cron.unschedule('${job_name}');`;
           
-          const unscheduleResult = await executeSQL(sqlCommand, id);
+          const unscheduleResult = await executeSQL(sqlCommand, id, true);
           if (unscheduleResult.error) {
             return { error: unscheduleResult.error };
           }
@@ -672,20 +709,20 @@ Use 'get_system_prompt_history' to view previous personalization versions and th
   } catch (error) {
     console.error("AI processing error:", error);
 
-    if (callbackUrl && body?.id && body?.metadata) {
+    if (callbackUrl && raw?.id && raw?.metadata) {
       try {
         const errorResponse = "Sorry, an internal error occurred.";
-        await saveMessage(body.userId, errorResponse, "assistant", body.id);
+        await saveMessage(raw.userId, errorResponse, "assistant", raw.id);
         
         await fetch(callbackUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             finalResponse: errorResponse,
-            id: body.id,
-            userId: body.userId,
-            metadata: { ...body.metadata, userId: body.userId },
-            timezone: body.timezone,
+            id: raw.id,
+            userId: raw.userId,
+            metadata: { ...raw.metadata, userId: raw.userId },
+            timezone: raw.timezone,
           }),
         });
       } catch (cbError) {

@@ -2,6 +2,7 @@ import { createClient } from "npm:@supabase/supabase-js";
 import { createOpenAI } from "npm:@ai-sdk/openai";
 import { generateText, tool } from "npm:ai";
 import { z } from "npm:zod";
+import { createClient as createSupabaseClient } from "npm:@supabase/supabase-js@2";
 
 // Environment Variables
 const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -11,8 +12,9 @@ const telegramWebhookSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
 const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
 const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
 const allowedUsernames = Deno.env.get("TELEGRAM_ALLOWED_USERNAMES");
+const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
-if (!supabaseUrl || !supabaseServiceRoleKey || !telegramBotToken || !openaiApiKey) {
+if (!supabaseUrl || !supabaseServiceRoleKey || !telegramBotToken || !openaiApiKey || !supabaseAnonKey) {
   throw new Error("Missing required environment variables");
 }
 
@@ -26,6 +28,38 @@ interface Metadata {
   telegramUsername?: string;
   chatId?: string | number;
 }
+
+// Zod schemas for Telegram webhook validation
+const TelegramUserSchema = z.object({
+  id: z.number(),
+  username: z.string().optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+}).passthrough();
+
+const ChatSchema = z.object({
+  id: z.union([z.string(), z.number()]),
+}).passthrough();
+
+const MessageSchema = z.object({
+  text: z.string(),
+  chat: ChatSchema,
+  from: TelegramUserSchema,
+}).passthrough();
+
+const CallbackQuerySchema = z.object({
+  id: z.string(),
+  data: z.string(),
+  from: TelegramUserSchema,
+  message: z.object({
+    chat: ChatSchema,
+  }).passthrough(),
+}).passthrough();
+
+const UpdateSchema = z.object({
+  message: MessageSchema.optional(),
+  callback_query: CallbackQuerySchema.optional(),
+}).passthrough();
 
 async function answerCallbackQuery(callbackQueryId: string, text: string | null = null) {
   if (!telegramBotToken) return;
@@ -84,66 +118,6 @@ function isUsernameAllowed(username: string | undefined): boolean {
   return allowedList.includes(username.toLowerCase());
 }
 
-async function findOrCreateUser(
-  telegramUserId: number,
-  username: string | undefined,
-  firstName: string | undefined,
-  lastName: string | undefined
-): Promise<string | null> {
-  const { data: existingUsers, error: queryError } = await supabaseAdmin.auth.admin.listUsers();
-  if (queryError) {
-    console.error("Error querying auth.users:", queryError);
-    return null;
-  }
-
-  if (existingUsers?.users) {
-    const existingUser = existingUsers.users.find(
-      (user) => user.user_metadata?.telegram_id === telegramUserId.toString()
-    );
-    if (existingUser) return existingUser.id;
-  }
-
-  const { data: newAuthUserObj, error: createAuthUserError } = await supabaseAdmin.auth.signInAnonymously({
-    options: {
-      data: {
-        telegram_id: telegramUserId.toString(),
-        telegram_username: username,
-        telegram_first_name: firstName,
-        telegram_last_name: lastName,
-        platform: "telegram",
-      }
-    }
-  });
-
-  if (createAuthUserError || !newAuthUserObj?.user?.id) {
-    console.error("Error creating Auth user:", createAuthUserError);
-    return null;
-  }
-
-  return newAuthUserObj.user.id;
-}
-
-async function getUserTimezone(userId: string): Promise<string | null> {
-  try {
-    const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId);
-    if (error) return null;
-    return data?.user?.user_metadata?.timezone || null;
-  } catch (error) {
-    return null;
-  }
-}
-
-async function updateUserTimezone(userId: string, timezone: string): Promise<boolean> {
-  try {
-    const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
-      user_metadata: { timezone }
-    });
-    return !error;
-  } catch (error) {
-    return false;
-  }
-}
-
 const timezoneSystemPrompt = `You are a helpful assistant that helps users set their timezone for accurate time-based features.
 
 Your task: Help the user set their timezone using the setTimezone tool, then ask what you can help with.
@@ -173,18 +147,26 @@ Deno.serve(async (req) => {
   }
 
   const callbackUrl = `${supabaseUrl}/functions/v1/telegram-outgoing`;
-  const aiDbHandlerUrl = `${supabaseUrl}/functions/v1/natural-db`;
+  const aiFunctionName = "natural-db"; // Supabase Edge Function to invoke
 
   try {
     const body = await req.json();
-    return await handleIncomingWebhook(body, callbackUrl, req.headers, aiDbHandlerUrl);
+    return await handleIncomingWebhook(body, callbackUrl, req.headers, aiFunctionName);
   } catch (error) {
     console.error("Error processing request:", error);
     return new Response("Internal Server Error", { status: 500 });
   }
 });
 
-async function handleIncomingWebhook(body: any, callbackUrl: string, headers: Headers, aiDbHandlerUrl: string) {
+async function handleIncomingWebhook(body: any, callbackUrl: string, headers: Headers, aiFunctionName: string) {
+  // Validate and parse webhook body
+  const parsed = UpdateSchema.safeParse(body);
+  if (!parsed.success) {
+    console.error("Invalid Telegram webhook payload:", parsed.error);
+    return new Response("Bad Request", { status: 400 });
+  }
+  const update = parsed.data;
+
   let userPrompt: string | null = null;
   let telegramUserId: number | null = null;
   let chatId: string | number | null = null;
@@ -201,23 +183,23 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
     }
   }
 
-  // Parse webhook update
-  if (body.message?.text && body.message?.from) {
-    userPrompt = body.message.text;
-    telegramUserId = body.message.from.id;
-    chatId = body.message.chat.id;
-    username = body.message.from.username;
-    firstName = body.message.from.first_name;
-    lastName = body.message.from.last_name;
-  } else if (body.callback_query) {
-    userPrompt = body.callback_query.data;
-    telegramUserId = body.callback_query.from.id;
-    chatId = body.callback_query.message.chat.id;
-    username = body.callback_query.from.username;
-    firstName = body.callback_query.from.first_name;
-    lastName = body.callback_query.from.last_name;
+  // Parse webhook update using validated data
+  if (update.message) {
+    userPrompt = update.message.text;
+    telegramUserId = update.message.from.id;
+    chatId = update.message.chat.id;
+    username = update.message.from.username;
+    firstName = update.message.from.first_name;
+    lastName = update.message.from.last_name;
+  } else if (update.callback_query) {
+    userPrompt = update.callback_query.data;
+    telegramUserId = update.callback_query.from.id;
+    chatId = update.callback_query.message.chat.id;
+    username = update.callback_query.from.username;
+    firstName = update.callback_query.from.first_name;
+    lastName = update.callback_query.from.last_name;
 
-    await answerCallbackQuery(body.callback_query.id);
+    await answerCallbackQuery(update.callback_query.id);
   }
 
   if (!userPrompt || !telegramUserId || !chatId) {
@@ -235,19 +217,87 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
     });
   }
 
-  const userId = await findOrCreateUser(telegramUserId, username, firstName, lastName);
-  if (!userId) {
-    return new Response(JSON.stringify({ status: "error_user_setup" }), {
-      headers: { "Content-Type": "application/json" },
-      status: 200,
-    });
+  // -------------------------------------------------------------------
+  // 1. Sign in anonymously to obtain a user session & JWT
+  // -------------------------------------------------------------------
+  const anonClient = createSupabaseClient(supabaseUrl, supabaseAnonKey);
+  const { data: anonData, error: anonErr } = await anonClient.auth.signInAnonymously();
+  if (anonErr || !anonData?.session?.access_token || !anonData.user?.id) {
+    console.error("Anonymous sign-in failed:", anonErr);
+    return new Response("Auth error", { status: 500 });
   }
 
-  // Check timezone and handle setup if needed
-  const userTimezone = await getUserTimezone(userId);
-  
+  const newUserId = anonData.user.id;
+  const accessToken = anonData.session.access_token;
+
+  // -------------------------------------------------------------------
+  // 2. Ensure profiles row exists & belongs to this user
+  // -------------------------------------------------------------------
+  let profileId: string | undefined;
+  let userTimezone: string | null = null;
+  try {
+    // Check for existing profile by telegram_id
+    const { data: existingProfiles, error: profErr } = await supabaseAdmin
+      .from("profiles")
+      .select("id, auth_user_id, timezone")
+      .eq("telegram_id", telegramUserId)
+      .maybeSingle();
+
+    if (profErr) {
+      throw profErr;
+    }
+
+    if (!existingProfiles) {
+      const { data: insertProf, error: insErr } = await supabaseAdmin.from("profiles").insert({
+        auth_user_id: newUserId,
+        telegram_id: telegramUserId,
+        telegram_username: username,
+        first_name: firstName,
+        last_name: lastName,
+        timezone: null,
+      }).select("id").single();
+      if (insErr) throw insErr;
+      profileId = insertProf.id;
+    } else {
+      profileId = existingProfiles.id;
+      userTimezone = existingProfiles.timezone ?? null;
+      if (existingProfiles.auth_user_id !== newUserId) {
+        await supabaseAdmin.from("profiles").update({ auth_user_id: newUserId }).eq("id", profileId);
+      }
+    }
+  } catch (e) {
+    console.error("Profile upsert error:", e);
+    return new Response("Profile error", { status: 500 });
+  }
+
+  if (!profileId) {
+    return new Response("Profile not found", { status: 500 });
+  }
+
+  // -------------------------------------------------------------------
+  // 2.5. Ensure chat and membership records exist
+  // -------------------------------------------------------------------
+  try {
+    const { error: chatErr } = await supabaseAdmin
+      .from("chats")
+      .upsert({ id: chatId.toString() }, { ignoreDuplicates: true, onConflict: "id" });
+    if (chatErr) throw chatErr;
+
+    const { error: memberErr } = await supabaseAdmin
+      .from("chat_users")
+      .upsert({ chat_id: chatId.toString(), user_id: profileId, role: "owner" }, { ignoreDuplicates: true, onConflict: "chat_id,user_id" });
+    if (memberErr) throw memberErr;
+
+  } catch (e) {
+    console.error("Chat/membership setup error:", e);
+    return new Response("Chat setup error", { status: 500 });
+  }
+
+  // -------------------------------------------------------------------
+  // 3. Check timezone AFTER profile exists (only if still null)
+  // -------------------------------------------------------------------
+
   if (!userTimezone) {
-    // Handle timezone setup using AI with tools
     try {
       const tools = {
         setTimezone: tool({
@@ -256,12 +306,14 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
             timezone: z.string().describe("Timezone in UTC format (e.g., 'UTC-5', 'UTC+1', 'UTC+5:30')"),
           }),
           execute: async ({ timezone }) => {
-            const success = await updateUserTimezone(userId, timezone);
-            if (success) {
-              return { success: true, message: `Timezone set to ${timezone}` };
-            } else {
+            const { error } = await supabaseAdmin
+              .from("profiles")
+              .update({ timezone })
+              .eq("id", profileId);
+            if (error) {
               return { success: false, message: "Failed to update timezone" };
             }
+            return { success: true, message: `Timezone set to ${timezone}` };
           },
         }),
       };
@@ -274,18 +326,17 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
         maxSteps: 3,
       });
 
-      // Send AI response via telegram-outgoing
       const outgoingPayload = {
         finalResponse: result.text,
         id: chatId,
-        userId,
+        userId: profileId,
         metadata: {
           platform: "telegram",
           telegramUserId,
           telegramUsername: username,
-          chatId
+          chatId,
         },
-        timezone: null, // No timezone set yet
+        timezone: null,
       };
 
       await fetch(callbackUrl, {
@@ -294,49 +345,57 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
         body: JSON.stringify(outgoingPayload),
       });
 
-      return new Response(JSON.stringify({ status: "timezone_setup_handled" }), {
-        headers: { "Content-Type": "application/json" },
-        status: 200,
-      });
-    } catch (error) {
-      console.error("Error in timezone setup:", error);
-      
-      // Fallback to direct message
-      await sendTelegramMessage(chatId, "I need to set up your timezone first. Could you please provide it in UTC format (e.g., 'UTC-5' for New York, 'UTC+1' for London)?");
-      
-      return new Response(JSON.stringify({ status: "timezone_setup_error" }), {
-        headers: { "Content-Type": "application/json" },
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({ status: "timezone_setup_handled" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    } catch (err) {
+      console.error("Timezone setup error:", err);
+      await sendTelegramMessage(
+        chatId,
+        "I need your timezone first. Please send it in UTC format (e.g., 'UTC-5').",
+      );
+      return new Response(
+        JSON.stringify({ status: "timezone_setup_error" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
   }
 
-  // Process AI request asynchronously
+  // RLS-enabled Supabase client for invoking edge functions
+  const supabaseRls = createSupabaseClient(
+    supabaseUrl,
+    supabaseAnonKey,
+    {
+      global: {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    },
+  );
+
+  // Process AI request asynchronously with RLS client
   const processAiRequest = async () => {
     try {
       const payloadToAiDbHandler = {
         userPrompt,
         id: chatId.toString(),
-        userId,
+        userId: profileId,
         metadata: {
           platform: "telegram",
           telegramUserId,
           telegramUsername: username,
-          chatId
+          chatId,
         },
-        timezone: userTimezone,
+        timezone: null, // No timezone set yet
         incomingMessageRole,
         callbackUrl: callbackUrl,
       };
 
-      const aiResponse = await fetch(aiDbHandlerUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payloadToAiDbHandler),
+      const { error } = await supabaseRls.functions.invoke(aiFunctionName, {
+        body: payloadToAiDbHandler,
       });
-
-      if (!aiResponse.ok) {
-        console.error(`Error calling AI DB Handler: ${aiResponse.status}`);
+      if (error) {
+        console.error("Error invoking natural-db:", error);
       }
     } catch (error) {
       console.error("Error in async AI processing:", error);

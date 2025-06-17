@@ -1,14 +1,15 @@
 import * as postgres from "https://deno.land/x/postgres@v0.17.0/mod.ts";
+import type { Pool, PoolClient } from "https://deno.land/x/postgres@v0.17.0/mod.ts";
 import { createOpenAI } from "npm:@ai-sdk/openai";
 import { embed } from "npm:ai";
 
 // Database connection pool
-let pool: any;
+type OpenAIClient = ReturnType<typeof createOpenAI>;
 
-// OpenAI client
-let openai: any;
+let pool: Pool | null = null;
+let openai: OpenAIClient | null = null;
 
-function ensureDbPool() {
+function ensureDbPool(): Pool {
   if (!pool) {
     const supabaseDbUrl = Deno.env.get("SUPABASE_DB_URL");
     if (!supabaseDbUrl) {
@@ -22,10 +23,10 @@ function ensureDbPool() {
       throw new Error("Failed to initialize database connection pool");
     }
   }
-  return pool;
+  return pool as Pool;
 }
 
-function ensureOpenAI() {
+function ensureOpenAI(): OpenAIClient {
   if (!openai) {
     const apiKey = Deno.env.get("OPENAI_API_KEY");
     if (!apiKey) {
@@ -39,172 +40,102 @@ function ensureOpenAI() {
       throw new Error("Failed to initialize OpenAI client");
     }
   }
-  return openai;
+  return openai as OpenAIClient;
 }
 
 // Convert BigInts to strings for JSON serialization
-export function convertBigIntsToStrings(obj: any): any {
-  if (obj === null || typeof obj !== "object") return obj;
-  if (typeof obj === "bigint") return obj.toString();
-  if (Array.isArray(obj)) return obj.map(convertBigIntsToStrings);
+type ReplaceBigIntWithString<T> = 
+  T extends bigint ? string :
+  T extends Array<infer U> ? Array<ReplaceBigIntWithString<U>> :
+  T extends object ? { [K in keyof T]: ReplaceBigIntWithString<T[K]> } :
+  T;
 
-  const newObj: any = {};
-  for (const key in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      const value = obj[key];
-      if (typeof value === "bigint") newObj[key] = value.toString();
-      else if (typeof value === "object")
-        newObj[key] = convertBigIntsToStrings(value);
-      else newObj[key] = value;
+export function convertBigIntsToStrings<T>(obj: T): ReplaceBigIntWithString<T> {
+  if (obj === null) return obj as ReplaceBigIntWithString<T>;
+  if (typeof obj === "bigint") return obj.toString() as ReplaceBigIntWithString<T>;
+  if (Array.isArray(obj)) {
+    return obj.map((item) => convertBigIntsToStrings(item)) as ReplaceBigIntWithString<T>;
+  }
+  if (typeof obj === "object") {
+    const newObj: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        newObj[key] = convertBigIntsToStrings((obj as any)[key]);
+      }
     }
+    return newObj;
   }
-  return newObj;
+  return obj as ReplaceBigIntWithString<T>;
 }
 
-// Generate safe schema name from chat_id
-function generateSchemaName(chatId: string | number): string {
-  // Replace any non-alphanumeric characters with underscores and add prefix
-  const sanitized = chatId.toString().replace(/[^a-zA-Z0-9]/g, '_');
-  return `chat_${sanitized}`;
-}
-
-// Create schema for a chat if it doesn't exist
-async function ensureChatSchema(connection: any, chatId: string | number): Promise<string> {
-  const schemaName = generateSchemaName(chatId);
-  
-  try {
-    // Check if schema exists
-    const schemaCheck = await connection.queryObject({
-      text: "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
-      args: [schemaName]
-    });
-
-    if (schemaCheck.rows.length === 0) {
-      // Create schema if it doesn't exist
-      await connection.queryObject(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
-      
-      // REVOKE any default PUBLIC privileges on this new schema
-      await connection.queryObject(`REVOKE ALL ON SCHEMA "${schemaName}" FROM PUBLIC;`);
-      
-      // Grant necessary permissions for the schema
-      // The current database user should have full access to the schema they create
-      await connection.queryObject(`GRANT USAGE, CREATE ON SCHEMA "${schemaName}" TO CURRENT_USER`);
-      
-      console.log(`Created schema: ${schemaName}`);
-    }
-    
-    return schemaName;
-  } catch (error) {
-    console.error(`Error creating schema ${schemaName}:`, error);
-    throw error;
-  }
-}
-
-// Ensure a dedicated Postgres role exists for this schema and that the
-// current (service) user can SET ROLE to it. The role receives privileges
-// *only* for objects inside the chat schema.
-async function ensureChatRole(connection: any, schemaName: string): Promise<{ roleName: string; password: string }> {
-  const roleName = `${schemaName}_role`;
-  // Generate a fresh random password each time. Short-lived (lives only for this request)
-  const password = crypto.randomUUID();
-
-  try {
-    // 1. Create role if it does not exist
-    await connection.queryObject(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
-          EXECUTE format('CREATE ROLE %I LOGIN NOINHERIT PASSWORD %L;', '${roleName}', '${password}');
-        END IF;
-      END$$;`);
-
-    // 2. If role existed, still set fresh password (makes creds single-use)
-    await connection.queryObject(`ALTER ROLE "${roleName}" LOGIN NOINHERIT PASSWORD '${password}';`);
-
-    // 3. Grant privileges inside its schema only
-    await connection.queryObject(`GRANT USAGE, CREATE ON SCHEMA "${schemaName}" TO "${roleName}";`);
-    await connection.queryObject(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schemaName}" GRANT ALL PRIVILEGES ON TABLES TO "${roleName}";`);
-    await connection.queryObject(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schemaName}" GRANT ALL PRIVILEGES ON SEQUENCES TO "${roleName}";`);
-    await connection.queryObject(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "${schemaName}" TO "${roleName}";`);
-    await connection.queryObject(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "${schemaName}" TO "${roleName}";`);
-
-    return { roleName, password };
-  } catch (error) {
-    console.error(`Error ensuring role ${roleName}:`, error);
-    throw error;
-  }
-}
-
-// Handle database operations for LLM (chat-specific schema only)
-async function handleLLMDbOperation(
+// Handle database operations for LLM (in "memories" schema)
+async function handleLLMDbOperation<T>(
   operationName: string,
-  chatId: string | number,
-  sqlLogic: (connection: any, schemaName: string) => Promise<any>
-) {
+  sqlLogic: (connection: PoolClient, schemaName: string) => Promise<T>
+): Promise<SqlOutcome<T>> {
   const dbPool = ensureDbPool();
-  let adminConnection;
-  let chatConnection;
+  let connection;
+  const schemaName = "memories";
+  const roleName = "memories_role";
   
   try {
-    // 1. Admin connection (service_role) to create schema/role as needed
-    adminConnection = await dbPool.connect();
+    connection = await dbPool.connect();
 
-    const schemaName = await ensureChatSchema(adminConnection, chatId);
-    const { roleName, password } = await ensureChatRole(adminConnection, schemaName);
+    // Limit privileges by switching to the dedicated role and schema
+    await connection.queryObject(`SET ROLE "${roleName}";`);
+    await connection.queryObject(`SET search_path TO "${schemaName}";`);
 
-    // 2. Build a connection string for the chat role
-    const supabaseDbUrl = Deno.env.get("SUPABASE_DB_URL");
-    if (!supabaseDbUrl) throw new Error("SUPABASE_DB_URL not set");
+    // Resource-safety guards (per-query)
+    // Limit runtime to 3 s and disable parallel plans so a single tenant cannot monopolise CPU cores.
+    await connection.queryObject(`SET LOCAL statement_timeout = 3000;`);
+    await connection.queryObject(`SET LOCAL max_parallel_workers_per_gather = 0;`);
 
-    const dbUrl = new URL(supabaseDbUrl);
-    dbUrl.username = roleName;
-    dbUrl.password = password;
-    const chatDbConnStr = dbUrl.toString();
-
-    // 3. Connect as the isolated chat role (single connection)
-    chatConnection = new postgres.Client(chatDbConnStr);
-    await chatConnection.connect();
-
-    // Restrict search path explicitly (chat role technically only has privs in its schema, but be explicit)
-    await chatConnection.queryObject(`SET search_path TO "${schemaName}", extensions, cron;`);
-
-    const result = await sqlLogic(chatConnection, schemaName);
+    const result = await sqlLogic(connection, schemaName);
     return { result: convertBigIntsToStrings(result) };
-  } catch (e: any) {
-    console.error(`LLM operation error in ${operationName}:`, e);
+  } catch (e: unknown) {
+    const err = e as { message?: string; fields?: Record<string, { code?: string }> };
+    console.error(`LLM operation error in ${operationName}:`, err);
     return {
-      error: `Execution failed for ${operationName}: ${e.message}${ e.fields?.code ? ` (Code: ${e.fields.code})` : "" }`,
+      error: `Execution failed for ${operationName}: ${err.message ?? "Unknown error"}${
+        (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
+      }`,
     };
   } finally {
-    if (chatConnection) {
-      try { await chatConnection.end(); } catch (_) {}
+    // Ensure the connection role is reset before releasing it back to the pool
+    if (connection) {
+      try {
+        await connection.queryObject(`RESET ROLE;`);
+      } catch (_) {
+        // ignore – RESET ROLE requires no special handling; best-effort
+      }
     }
-    if (adminConnection) {
-      try { adminConnection.release(); } catch (_) {}
+    if (connection) {
+      try { connection.release(); } catch (_) {}
     }
   }
 }
 
 // Handle database operations for system functions (public schema access)
-async function handleSystemDbOperation(
+async function handleSystemDbOperation<T>(
   operationName: string,
-  sqlLogic: (connection: any) => Promise<any>
-) {
+  sqlLogic: (connection: PoolClient) => Promise<T>
+): Promise<SqlOutcome<T>> {
   const dbPool = ensureDbPool();
   let connection;
   
   try {
     connection = await dbPool.connect();
-    // System operations have access to public schema for messages, system_prompts, etc.
+    // Allow access to required schemas
     await connection.queryObject(`SET search_path TO public, extensions, cron;`);
     
     const result = await sqlLogic(connection);
     return { result: convertBigIntsToStrings(result) };
-  } catch (e: any) {
-    console.error(`System operation error in ${operationName}:`, e);
+  } catch (e: unknown) {
+    const err = e as { message?: string; fields?: Record<string, { code?: string }> };
+    console.error(`System operation error in ${operationName}:`, err);
     return {
-      error: `Execution failed for ${operationName}: ${e.message}${
-        e.fields?.code ? ` (Code: ${e.fields.code})` : ""
+      error: `Execution failed for ${operationName}: ${err.message ?? "Unknown error"}${
+        (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
       }`,
     };
   } finally {
@@ -218,34 +149,38 @@ async function handleSystemDbOperation(
   }
 }
 
-// LLM SQL execution - operates only within chat-specific schema
-export async function executeSQL(query: string, chatId: string | number, allowCron: boolean = false) {
-  if (!chatId) {
-    return { error: "Chat ID is required for SQL execution" };
-  }
+// ----------------------------------------------
+// Typed result wrapper (very light)
+export interface SqlOutcome<T = unknown> {
+  result?: T;
+  error?: string;
+}
 
-  if (allowCron) {
-    // When allowed, run via service_role with public search_path.
-    return handleSystemDbOperation("execute_sql_admin", async (connection) => {
-      const result = await connection.queryObject(query);
-      return result.rows;
-    });
-  }
-
-  // All other queries run in isolated chat schema under chat role (no cron privileges).
-  return handleLLMDbOperation("execute_sql", chatId, async (connection, schemaName) => {
-    const result = await connection.queryObject(query);
+// Restricted execution used by LLM – confined to memories schema / role
+export async function executeRestrictedSQL<T = unknown>(
+  text: string,
+  args: unknown[] = [],
+): Promise<SqlOutcome<T[]>> {
+  return handleLLMDbOperation("execute_restricted_sql", async (connection) => {
+    const result = await connection.queryObject({ text, args });
     return result.rows;
   });
 }
 
-// Get schema details for a specific chat
-export async function getChatSchemaDetails(chatId: string | number) {
-  if (!chatId) {
-    return { error: "Chat ID is required" };
-  }
+// Privileged execution (service_role) for internal features like cron management
+export async function executePrivilegedSQL<T = unknown>(
+  text: string,
+  args: unknown[] = [],
+): Promise<SqlOutcome<T[]>> {
+  return handleSystemDbOperation("execute_privileged_sql", async (connection) => {
+    const result = await connection.queryObject({ text, args });
+    return result.rows;
+  });
+}
 
-  return handleLLMDbOperation("get_chat_schema_details", chatId, async (connection, schemaName) => {
+// Get schema details for the "memories" schema
+export async function getMemoriesSchemaDetails() {
+  return handleLLMDbOperation("get_memories_schema_details", async (connection, schemaName) => {
     const query = `
       SELECT jsonb_agg(row_to_json(info)) as columns
       FROM (
@@ -293,15 +228,18 @@ export async function searchSimilarMessages(
     // Use parameterized query to safely pass the embedding vector
     const result = await connection.queryObject({
       text: `
-        SELECT role, content, created_at, 
-               1 - (embedding <=> $1) as similarity_score
-        FROM public.messages 
+        SELECT m.role,
+               CASE WHEN m.role = 'user' THEN CONCAT(COALESCE(p.first_name, 'User'), ': ', m.content) ELSE m.content END as content,
+               m.created_at,
+               1 - (m.embedding <=> $1) as similarity_score
+        FROM public.messages m
+        LEFT JOIN public.profiles p ON p.auth_user_id = m.user_id
         WHERE chat_id = $2
           AND embedding IS NOT NULL
           AND content IS NOT NULL
           AND content != ''
-          AND 1 - (embedding <=> $1) > $3
-        ORDER BY embedding <=> $1
+          AND 1 - (m.embedding <=> $1) > $3
+        ORDER BY m.embedding <=> $1
         LIMIT $4;
       `,
       args: [embedding, chatId.toString(), similarityThreshold, maxResults]
@@ -326,7 +264,7 @@ export async function loadRecentMessages(
 
     const query = supabaseClient
       .from("messages")
-      .select("role, content, created_at")
+      .select("role, content, created_at, profiles ( first_name )")
       .eq("chat_id", chatId)
       .order("created_at", { ascending: false })
       .limit(limit);
@@ -338,7 +276,28 @@ export async function loadRecentMessages(
       return { error: recentError.message, result: null };
     }
 
-    const chronologicalMessages = (recentMessages || []).reverse();
+    // Typed representation of a row returned from the `messages` view
+    interface MessageRow {
+      role: string;
+      content: string;
+      created_at: string;
+      profiles?: { first_name?: string } | null;
+    }
+
+    const chronologicalMessages = (recentMessages || [])
+      .reverse()
+      .map((msg: MessageRow) => {
+        const firstName = msg.profiles?.first_name;
+        return {
+          role: msg.role,
+          content:
+            msg.role === "user" && firstName
+              ? `${firstName}: ${msg.content}`
+              : msg.content,
+          created_at: msg.created_at,
+        };
+      });
+
     return { result: chronologicalMessages, error: null };
   } catch (error) {
     console.error("Exception loading recent messages:", error);
@@ -419,7 +378,12 @@ export async function loadRecentAndRelevantMessages(
     }
 
     const chronologicalMessages = recentResult.result || [];
-    let relevantContext: any[] = [];
+    let relevantContext: Array<{
+      role: string;
+      content: string;
+      created_at: string;
+      similarity_score?: number;
+    }> = [];
 
     if (currentPrompt?.trim() && chronologicalMessages.length > 0) {
       try {

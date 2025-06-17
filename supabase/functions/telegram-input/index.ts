@@ -29,6 +29,11 @@ interface Metadata {
   chatId?: string | number;
 }
 
+interface CallbackAnswerPayload {
+  callback_query_id: string;
+  text?: string;
+}
+
 // Zod schemas for Telegram webhook validation
 const TelegramUserSchema = z.object({
   id: z.number(),
@@ -65,7 +70,7 @@ async function answerCallbackQuery(callbackQueryId: string, text: string | null 
   if (!telegramBotToken) return;
 
   const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/answerCallbackQuery`;
-  const payload: any = { callback_query_id: callbackQueryId };
+  const payload: CallbackAnswerPayload = { callback_query_id: callbackQueryId };
   if (text) payload.text = text;
 
   try {
@@ -158,7 +163,9 @@ Deno.serve(async (req) => {
   }
 });
 
-async function handleIncomingWebhook(body: any, callbackUrl: string, headers: Headers, aiFunctionName: string) {
+type TelegramUpdate = z.infer<typeof UpdateSchema>;
+
+async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers: Headers, aiFunctionName: string) {
   // Validate and parse webhook body
   const parsed = UpdateSchema.safeParse(body);
   if (!parsed.success) {
@@ -173,7 +180,6 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
   let username: string | undefined = undefined;
   let firstName: string | undefined = undefined;
   let lastName: string | undefined = undefined;
-  const incomingMessageRole = "user";
 
   // Check webhook secret
   if (telegramWebhookSecret) {
@@ -230,6 +236,17 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
   const newUserId = anonData.user.id;
   const accessToken = anonData.session.access_token;
 
+  // Create a single RLS-enabled Supabase client scoped to the current anonymous session
+  const supabaseRls = createSupabaseClient(
+    supabaseUrl,
+    supabaseAnonKey,
+    {
+      global: {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    },
+  );
+
   // -------------------------------------------------------------------
   // 2. Ensure profiles row exists & belongs to this user
   // -------------------------------------------------------------------
@@ -275,26 +292,32 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
   }
 
   // -------------------------------------------------------------------
-  // 2.5. Ensure chat and membership records exist
+  // 3. Ensure chat and membership records exist
   // -------------------------------------------------------------------
   try {
-    const { error: chatErr } = await supabaseAdmin
+    const chatIdText = chatId.toString();
+    // Insert chat; if it already exists ignore duplicate error
+    const { error: chatInsertErr } = await supabaseRls
       .from("chats")
-      .upsert({ id: chatId.toString() }, { ignoreDuplicates: true, onConflict: "id" });
-    if (chatErr) throw chatErr;
+      .insert({ id: chatIdText, title: null, created_by: profileId });
+    if (chatInsertErr && chatInsertErr.code !== "23505") { // 23505 = unique_violation
+      throw chatInsertErr;
+    }
 
-    const { error: memberErr } = await supabaseAdmin
+    // RLS-enabled client (scoped to the anonymous user)
+    const { error: chatUserErr } = await supabaseRls
       .from("chat_users")
-      .upsert({ chat_id: chatId.toString(), user_id: profileId, role: "owner" }, { ignoreDuplicates: true, onConflict: "chat_id,user_id" });
-    if (memberErr) throw memberErr;
-
-  } catch (e) {
-    console.error("Chat/membership setup error:", e);
+      .upsert({ chat_id: chatIdText, user_id: profileId }, { onConflict: "chat_id,user_id" });
+    if (chatUserErr) {
+      throw chatUserErr;
+    }
+  } catch (chatErr) {
+    console.error("Error ensuring chat records:", chatErr);
     return new Response("Chat setup error", { status: 500 });
   }
 
   // -------------------------------------------------------------------
-  // 3. Check timezone AFTER profile exists (only if still null)
+  // 4. Check timezone AFTER profile exists (only if still null)
   // -------------------------------------------------------------------
 
   if (!userTimezone) {
@@ -337,6 +360,7 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
           chatId,
         },
         timezone: null,
+        incomingMessageRole: "user",
       };
 
       await fetch(callbackUrl, {
@@ -362,17 +386,6 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
     }
   }
 
-  // RLS-enabled Supabase client for invoking edge functions
-  const supabaseRls = createSupabaseClient(
-    supabaseUrl,
-    supabaseAnonKey,
-    {
-      global: {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      },
-    },
-  );
-
   // Process AI request asynchronously with RLS client
   const processAiRequest = async () => {
     try {
@@ -387,7 +400,7 @@ async function handleIncomingWebhook(body: any, callbackUrl: string, headers: He
           chatId,
         },
         timezone: null, // No timezone set yet
-        incomingMessageRole,
+        incomingMessageRole: "user",
         callbackUrl: callbackUrl,
       };
 

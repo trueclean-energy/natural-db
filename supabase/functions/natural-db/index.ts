@@ -1,15 +1,19 @@
 import { createOpenAI } from "npm:@ai-sdk/openai";
-import { generateText, tool, experimental_createMCPClient } from "npm:ai";
+import { generateText, experimental_createMCPClient } from "npm:ai";
 import { z } from "npm:zod";
 import { 
-  executeSQL, 
+  executeRestrictedSQL,
+  executePrivilegedSQL,
   convertBigIntsToStrings,
   loadRecentAndRelevantMessages,
   insertMessage,
   generateEmbedding,
-  getChatSchemaDetails
+  getMemoriesSchemaDetails
 } from "./db-utils.ts";
 import { createClient } from "npm:@supabase/supabase-js";
+
+// Factory for all AI tools (isolated for easier extensibility)
+import { createTools } from "./tools.ts";
 
 /**
  * AI DB Handler with Chat-Specific Schema Isolation
@@ -32,7 +36,7 @@ const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
 const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
 const zapierMcpUrl = Deno.env.get("ZAPIER_MCP_URL");
-const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+const allowedUsernames = Deno.env.get("TELEGRAM_ALLOWED_USERNAMES");
 
 if (!supabaseUrl || !supabaseServiceRoleKey || !openaiApiKey) {
   throw new Error("Missing required environment variables");
@@ -60,16 +64,19 @@ const IncomingPayloadSchema = z.object({
 });
 
 async function getActiveCronJobDetails(chatId: string | number) {
-  const result = await executeSQL(
-    `SELECT jobname, schedule FROM cron.job WHERE active = true AND (jobname LIKE 'one_off_${chatId}_%' OR jobname LIKE 'cron_${chatId}_%') ORDER BY jobname;`,
-    chatId,
-    true
+  const result = await executePrivilegedSQL(
+    `SELECT jobname, schedule 
+       FROM cron.job 
+      WHERE active = true 
+        AND (jobname LIKE $1 OR jobname LIKE $2) 
+      ORDER BY jobname;`,
+    [`one_off_${chatId}_%`, `cron_${chatId}_%`]
   );
   return result.error ? result : { result: result.result };
 }
 
-async function getChatSchemaDetailsFormatted(chatId: string | number) {
-  const operationResult = await getChatSchemaDetails(chatId);
+async function getChatSchemaDetailsFormatted(_chatId?: string | number) {
+  const operationResult = await getMemoriesSchemaDetails();
 
   if (operationResult.error) {
     return {
@@ -86,9 +93,29 @@ async function getChatSchemaDetailsFormatted(chatId: string | number) {
 
   const schemaData = schemaContents.columns;
   let formattedString = `\nDetails of your private database schema:\n`;
-  const tables: any = {};
 
-  schemaData.forEach((col: any) => {
+  // ----------------------
+  // Type declarations
+  // ----------------------
+
+  interface ColumnInfo {
+    table_name: string;
+    column_name: string;
+    data_type: string;
+    udt_name: string;
+    table_comment?: string | null;
+    column_comment?: string | null;
+  }
+
+  interface ChatMessage {
+    role: "user" | "assistant" | "system" | "system_routine_task";
+    content: string;
+    created_at?: string;
+  }
+
+  const tables: Record<string, { columns: ColumnInfo[]; comment?: string | null }> = {};
+
+  schemaData.forEach((col: ColumnInfo) => {
     const tableName = col.table_name;
     if (!tables[tableName]) {
       tables[tableName] = {
@@ -111,7 +138,7 @@ async function getChatSchemaDetailsFormatted(chatId: string | number) {
       formattedString += ` - ${table.comment}`;
     }
     formattedString += `\n`;
-    table.columns.forEach((col: any) => {
+    table.columns.forEach((col: ColumnInfo) => {
       let columnDesc = `    - ${col.name}: ${col.type}`;
       if (col.udt_name && col.type !== col.udt_name) {
         if (col.type === "USER-DEFINED")
@@ -216,12 +243,34 @@ async function updateSystemPrompt(chatId: string, newPrompt: string, description
   }
 }
 
+function isUsernameAllowed(username: string | undefined): boolean {
+  if (!allowedUsernames) return true; // If not configured, allow all
+  if (!username) return false;
+  const allowedList = allowedUsernames.split(',').map(u => u.trim().toLowerCase());
+  return allowedList.includes(username.toLowerCase());
+}
+
+// Ensure chat & membership exist (to satisfy FKs and RLS)
+async function ensureChatAndMembership(chatId: string | number, profileId: string) {
+  try {
+    const chatIdText = chatId.toString();
+    await supabase
+      .from('chats')
+      .upsert({ id: chatIdText, created_by: profileId }, { onConflict: 'id' });
+    await supabase
+      .from('chat_users')
+      .upsert({ chat_id: chatIdText, user_id: profileId }, { onConflict: 'chat_id,user_id' });
+  } catch (e) {
+    console.error('ensureChatAndMembership error:', e);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  let mcpClient: any = null;
+  let mcpClient: unknown = null;
 
   try {
     const raw = await req.json();
@@ -241,32 +290,46 @@ Deno.serve(async (req) => {
       callbackUrl,
     } = parsed.data;
 
-    // Authorization Gate: Verify the user is a member of the chat.
-    try {
-      const { data: membership, error } = await supabase
-        .from("chat_users")
-        .select("user_id")
-        .eq("chat_id", id.toString())
-        .eq("user_id", userId)
-        .maybeSingle();
-
-      if (error) {
-        throw new Error(`Database error during membership check: ${error.message}`);
-      }
-
-      if (!membership) {
-        console.warn(`Attempted access by non-member. User: ${userId}, Chat: ${id}`);
-        return new Response("Forbidden: You are not a member of this chat.", { status: 403 });
-      }
-    } catch (e) {
-      console.error("Authorization gate failed:", e.message);
-      return new Response("Forbidden: Could not verify chat membership.", { status: 403 });
+    // Ensure chat and membership rows exist to satisfy FK during message insert
+    if (id && userId) {
+      await ensureChatAndMembership(id, userId);
     }
+
+    // ------------------------------------------------------------------
+    //  Username Authorization Check (Telegram)
+    // ------------------------------------------------------------------
+    if (allowedUsernames) {
+      try {
+        const { data: profileRow, error: profileErr } = await supabase
+          .from('profiles')
+          .select('telegram_username')
+          .eq('id', userId)
+          .single();
+
+        if (profileErr) {
+          console.error('Error fetching profile for auth check:', profileErr);
+          return new Response("Unauthorized user", { status: 403 });
+        }
+
+        const telegramUsername: string | undefined = profileRow?.telegram_username ?? undefined;
+        if (!isUsernameAllowed(telegramUsername)) {
+          return new Response(
+            JSON.stringify({ status: 'unauthorized_user' }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+      } catch (authErr) {
+        console.error('Authorization check failed:', authErr);
+        return new Response("Unauthorized user", { status: 403 });
+      }
+    }
+
+    // Authorization Gate removed – single-tenant mode (no chat_users table)
 
     const cronCallbackUrl = `${supabaseUrl}/functions/v1/natural-db`;
 
-    let chatHistory: any[] = [];
-    let relevantContext: any[] = [];
+    let chatHistory: ChatMessage[] = [];
+    let relevantContext: ChatMessage[] = [];
 
     // Load message history and save incoming message
     if (incomingMessageRole !== "system_routine_task") {
@@ -300,7 +363,7 @@ Deno.serve(async (req) => {
     }
 
     // Initialize MCP client if available
-    let mcpTools: any = {};
+    let mcpTools: Record<string, unknown> = {};
     if (zapierMcpUrl) {
       try {
         mcpClient = await experimental_createMCPClient({
@@ -312,208 +375,17 @@ Deno.serve(async (req) => {
       }
     }
 
-    const tools = {
-      execute_sql: tool({
-        description: `Executes SQL within your private schema. Create tables directly (e.g., CREATE TABLE my_notes). Escape single quotes ('') in string literals. You have full control over this isolated database space.`,
-        parameters: z.object({
-          query: z.string().describe("SQL query (DML/DDL)."),
-        }),
-        execute: async ({ query }) => {
-          const result = await executeSQL(query, id);
-          if (result.error) {
-            return { error: result.error };
-          }
+    const baseTools = createTools({
+      id,
+      userId,
+      metadata,
+      timezone,
+      cronCallbackUrl,
+      callbackUrl,
+      updateSystemPrompt,
+    });
 
-          const trimmedQuery = query.trim();
-          const rowsWithStrings = result.result ? convertBigIntsToStrings(result.result) : [];
-
-          if (trimmedQuery.toUpperCase().startsWith("SELECT") || (rowsWithStrings && rowsWithStrings.length > 0)) {
-            return JSON.stringify(rowsWithStrings);
-          } else {
-            return JSON.stringify({
-              message: "Command executed successfully.",
-              rowCount: Number(result.rowCount ?? 0),
-            });
-          }
-        },
-      }),
-
-      get_distinct_column_values: tool({
-        description: `Retrieves distinct values for a column within your private schema. Use for columns with discrete values (e.g., status, category) rather than freeform text.`,
-        parameters: z.object({
-          table_name: z.string().describe("Table name."),
-          column_name: z.string().describe("Column name."),
-        }),
-        execute: async ({ table_name, column_name }) => {
-          const columnNameRegex = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-          const tableNameRegex = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-          if (!columnNameRegex.test(column_name) || !tableNameRegex.test(table_name)) {
-            return { error: "Invalid table or column name format." };
-          }
-
-          const query = `SELECT DISTINCT "${column_name}" FROM ${table_name};`;
-          const result = await executeSQL(query, id);
-
-          if (result.error) {
-            return { error: result.error };
-          }
-
-          const distinctValues = result.result.map((row: any) => row[column_name]);
-          return { distinct_values: convertBigIntsToStrings(distinctValues) };
-        },
-      }),
-
-      schedule_prompt: tool({
-        description: "Schedules a job to run at a future time using cron or ISO 8601 timestamp.",
-        parameters: z.object({
-          schedule_expression: z.string().describe("Cron (e.g., '0 9 * * MON') or ISO timestamp."),
-          prompt_to_schedule: z.string().describe("Directive for the assistant when job runs."),
-          job_name: z.string().describe("Descriptive suffix for job name."),
-        }),
-        execute: async ({ schedule_expression, prompt_to_schedule, job_name }) => {
-          if (!id || !userId || !cronCallbackUrl) {
-            return { error: "Missing required data for scheduling." };
-          }
-
-          const payloadForCron = JSON.stringify({
-            userPrompt: prompt_to_schedule,
-            id,
-            userId,
-            metadata: { ...metadata, originalUserMessage: userPrompt },
-            timezone,
-            incomingMessageRole: "system_routine_task",
-            callbackUrl,
-          });
-
-          const escapedPayload = payloadForCron.replace(/'/g, "''");
-          let isOneOff = false;
-
-          try {
-            const date = new Date(schedule_expression);
-            if (!isNaN(date.getTime()) && 
-                schedule_expression.includes("T") && 
-                (schedule_expression.includes("Z") || schedule_expression.match(/[+-]\d{2}:\d{2}$/))) {
-              isOneOff = true;
-            }
-          } catch (e) {
-            // Not ISO timestamp, treat as cron
-          }
-
-          const descriptiveSuffix = job_name ? 
-            job_name.replace(/[^a-zA-Z0-9_]/g, "_").substring(0, 18) : 
-            Date.now().toString();
-
-          const finalJobName = isOneOff ? 
-            `one_off_${id}_${descriptiveSuffix}` : 
-            `cron_${id}_${descriptiveSuffix}`;
-
-          let sqlCommand: string;
-
-          if (isOneOff) {
-            const date = new Date(schedule_expression);
-            const minute = date.getUTCMinutes();
-            const hour = date.getUTCHours();
-            const dayOfMonth = date.getUTCDate();
-            const month = date.getUTCMonth() + 1;
-            const cronForTimestamp = `${minute} ${hour} ${dayOfMonth} ${month} *`;
-
-            const taskLogic = `PERFORM net.http_post(url := '${cronCallbackUrl}', body := '${escapedPayload}'::jsonb, headers := '{"Content-Type": "application/json"}'::jsonb); PERFORM cron.unschedule('${finalJobName}');`;
-            sqlCommand = `SELECT cron.schedule('${finalJobName}', '${cronForTimestamp}', $$ DO $job$ BEGIN ${taskLogic} EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'Error job ${finalJobName}: %', SQLERRM; BEGIN PERFORM cron.unschedule('${finalJobName}'); RAISE NOTICE 'Unscheduled ${finalJobName} after error.'; EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'CRITICAL: Failed to unschedule ${finalJobName} after error: %', SQLERRM; END; RAISE; END; $job$; $$);`;
-          } else {
-            sqlCommand = `SELECT cron.schedule('${finalJobName}', '${schedule_expression}', $$ SELECT net.http_post(url := '${cronCallbackUrl}', body := '${escapedPayload}'::jsonb, headers := '{"Content-Type": "application/json"}'::jsonb) $$);`;
-          }
-
-          const scheduleResult = await executeSQL(sqlCommand, id, true);
-          if (scheduleResult.error) {
-            return { error: scheduleResult.error };
-          }
-
-          if (scheduleResult.result && scheduleResult.result.length > 0) {
-            const jobIdResult = scheduleResult.result[0][Object.keys(scheduleResult.result[0])[0]];
-            return `Job scheduled. Name: ${finalJobName || jobIdResult}. Type: ${isOneOff ? "One-off" : "Recurring"}`;
-          } else {
-            return { error: "Failed to schedule job: No confirmation from cron.schedule." };
-          }
-        },
-      }),
-
-      unschedule_prompt: tool({
-        description: "Unschedules a previously scheduled job by its job name. Use this to cancel or remove scheduled tasks.",
-        parameters: z.object({
-          job_name: z.string().describe("The name of the job to unschedule (from schedule_prompt or visible in scheduled routines)."),
-        }),
-        execute: async ({ job_name }) => {
-          if (!job_name) {
-            return { error: "Job name is required for unscheduling." };
-          }
-
-          // Validate job name format to prevent SQL injection
-          const jobNameRegex = /^[a-zA-Z0-9_]+$/;
-          if (!jobNameRegex.test(job_name)) {
-            return { error: "Invalid job name format. Job names should contain only letters, numbers, and underscores." };
-          }
-
-          const sqlCommand = `SELECT cron.unschedule('${job_name}');`;
-          
-          const unscheduleResult = await executeSQL(sqlCommand, id, true);
-          if (unscheduleResult.error) {
-            return { error: unscheduleResult.error };
-          }
-
-          return `Job '${job_name}' has been successfully unscheduled and removed.`;
-        },
-      }),
-
-      update_system_prompt: tool({
-        description: "Updates ONLY the personalized behavior section of the system prompt. The base system behavior (database operations, scheduling, etc.) never changes. Use this when the user wants to customize personality, communication style, or add specific behavioral preferences.",
-        parameters: z.object({
-          new_system_prompt: z.string().describe("ONLY the personalized behavior additions/changes - NOT the entire system prompt. Focus on personality, communication style, or specific user preferences. The base database and scheduling behavior remains unchanged."),
-          description: z.string().describe("Brief description of what this prompt change accomplishes or why it was made."),
-        }),
-        execute: async ({ new_system_prompt, description }) => {
-          if (!id) {
-            return { error: "Chat ID is required to update system prompt." };
-          }
-
-          const result = await updateSystemPrompt(id, new_system_prompt, description);
-          
-          if (result.success) {
-            return `System prompt updated successfully. Description: ${description}. The new prompt will take effect in the next conversation.`;
-          } else {
-            return { error: result.error || "Failed to update system prompt." };
-          }
-        },
-      }),
-
-      get_system_prompt_history: tool({
-        description: "Retrieves the history of system prompt changes for this user, including versions and descriptions.",
-        parameters: z.object({}),
-                execute: async () => {
-          if (!id) {
-            return { error: "Chat ID is required to retrieve system prompt history." };
-          }
-
-          const query = `
-            SELECT version, description, created_by_role, is_active, created_at, 
-                   LENGTH(prompt_content) as prompt_length
-            FROM system_prompts 
-            WHERE chat_id = '${id}' 
-            ORDER BY version DESC 
-            LIMIT 10
-          `;
-          
-          const result = await executeSQL(query, id);
-          
-          if (result.error) {
-            return { error: result.error };
-          }
-
-          return JSON.stringify(result.result);
-        },
-      }),
-
-      ...mcpTools,
-    };
+    const tools = { ...baseTools, ...mcpTools };
 
     // Get schema and cron job details
     let formattedSchemaDetails = `You are operating within your own private database schema.`;
@@ -531,12 +403,12 @@ Deno.serve(async (req) => {
         activeCronJobsString = `Note: Error fetching scheduled routines: ${cronJobsResult.error}`;
       } else if (cronJobsResult.result && cronJobsResult.result.length > 0) {
         activeCronJobsString = "Currently Scheduled Routines:\n";
-        cronJobsResult.result.forEach((job: any) => {
+        cronJobsResult.result.forEach((job: { jobname: string; schedule: string }) => {
           activeCronJobsString += `  - Job Name: ${job.jobname}, Schedule: ${job.schedule}\n`;
         });
       }
-    } catch (e: any) {
-      activeCronJobsString = `Exception occurred while fetching scheduled routines: ${e.message}`;
+    } catch (e: unknown) {
+      activeCronJobsString = `Exception occurred while fetching scheduled routines: ${e}`;
     }
 
     const now = new Date();
@@ -676,26 +548,29 @@ Use 'get_system_prompt_history' to view previous personalization versions and th
     });
 
     const finalResponse = result.text;
+    const trimmedFinalResponse = finalResponse.trim();
 
-    // Save assistant response
-    const responseEmbedding = await generateMessageEmbedding(finalResponse);
-    await saveMessage(userId, finalResponse, "assistant", id, responseEmbedding);
+    if (trimmedFinalResponse.length > 0) {
+      // Save assistant response
+      const responseEmbedding = await generateMessageEmbedding(trimmedFinalResponse);
+      await saveMessage(userId, trimmedFinalResponse, "assistant", id, responseEmbedding);
 
-    // Send response to callback
-    if (callbackUrl) {
-      const outgoingPayload = {
-        finalResponse,
-        id,
-        userId,
-        metadata: { ...metadata, userId },
-        timezone,
-      };
-      
-      await fetch(callbackUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(outgoingPayload),
-      });
+      // Send response to callback
+      if (callbackUrl) {
+        const outgoingPayload = {
+          finalResponse: trimmedFinalResponse,
+          id,
+          userId,
+          metadata: { ...metadata, userId },
+          timezone,
+        };
+
+        await fetch(callbackUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(outgoingPayload),
+        });
+      }
     }
 
     return new Response(

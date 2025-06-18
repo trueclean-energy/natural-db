@@ -1,8 +1,8 @@
 # Building an AI Personal Assistant with Supabase: Persistent Memory & Autonomous Intelligence
 
-While Large Language Models understand natural language, they don't generally maintain structured data across conversations. The system outlined in this post helps you do just that. And we'll use it to build an evolving AI assistant that can maintain precise, queryable records over time.
+Large Language Models excel at turning raw text into structured data, though they struggle to retrieve that structured data accurately across long sessions. In this post we'll use this strength and combine it with a Postgres database, along with a few other tools, to create a personalised Assistant with a long term memory.
 
-At a high level, the system's flexibility is created by combining these core primitives: An LLM owned database schema through an execute_sql tool, scheduled tasks for autonomy, web searches for real-time information, and MCP integrations for extended actions to may integrate with external tools.
+At a high level, the system's flexibility is created by combining these core building blocks: An LLM owned database schema through an execute_sql tool, scheduled tasks for autonomy, web searches for real-time information, and MCP integrations for extended actions to may integrate with external tools.
 
 See it at work in the video below.
 
@@ -79,7 +79,7 @@ The system uses Telegram as the default interface, implemented as an edge functi
 
 The assistant maintains two behavioral layers:
 
-- **Base Behavior**: Core functionality (database operations, scheduling, web search) remains constant via a constant system prompt
+- **Base Behavior**: Core functionality (database operations, scheduling, web search) remains consistent via a constant system prompt
 - **Personalized Behavior**: Communication style and preferences that evolve based on user feedback which can be changed via a dedicated tool and stored in a public.system_prompts table
 
 When you say "be more formal" or "address me by name," these preferences are stored with version history and persist across all conversations, creating a personalized experience.

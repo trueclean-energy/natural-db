@@ -1,8 +1,10 @@
 # Building an AI Personal Assistant with Supabase: Persistent Memory & Autonomous Intelligence
 
-Large Language Models excel at natural language understanding but struggle with maintaining structured data across conversations. This system enhances LLMs by combining their natural language processing with PostgreSQL storage, creating an AI that maintains precise, queryable records over time. The assistant converts conversations into structured database entries, enabling reliable data retrieval and analysis through database operations, scheduled prompts, web searches, and MCP integrations.
+While Large Language Models understand natural language, they don't generally maintain structured data across conversations. The system outlined in this post helps you do just that. And we'll use it to build an evolving AI assistant that can maintain precise, queryable records over time.
 
-The system's power comes from how its core components work together: database operations store structured data, scheduled tasks create autonomy, web searches gather real-time information, and MCP integrations enable real-world actions. This creates a flexible foundation that starts simple (like tracking expenses) and can evolve into complex workflows (like automated investment monitoring). For example, a scheduled task might analyze your portfolio, trigger web searches for market trends, update your database with new insights, and send personalized reports through Zapier—all while maintaining organized, queryable data that improves with each cycle.
+At a high level, the system's flexibility is created by combining these core primitives: An LLM owned database schema through an execute_sql tool, scheduled tasks for autonomy, web searches for real-time information, and MCP integrations for extended actions to may integrate with external tools.
+
+See it at work in the video below.
 
 <video className="rounded-sm m-0" autoPlay loop muted>
   <source
@@ -15,45 +17,31 @@ The system's power comes from how its core components work together: database op
 
 ### Scoped Database Control
 
-Each chat operates in a completely isolated PostgreSQL schema (`chat_{chat_id}`), providing bulletproof security:
+The assistant uses a dedicated PostgreSQL schema called `memories` to store all of its structured data. To ensure security, the LLM operates under a specific role, `memories_role`, which is granted permissions only within this schema.
 
-- **Private Schemas**: LLM can create tables, store data, and perform operations without accessing other users' information
-- **System Table Protection**: Critical system tables remain in the `public` schema, completely inaccessible to the LLM
-- **Automatic Schema Creation**: New chats get properly configured private schemas with restricted permissions
-- **Complete Data Separation**: Chat A's tables are invisible to Chat B, preventing any cross-contamination
-
-```sql
--- Auto-generated from natural language in your private schema
-create table expenses (
-  id uuid primary key,
-  amount decimal,
-  category text,
-  date timestamptz default NOW()
-);
-
-insert into expenses (amount, category, store, date, note)
-values (47.00, 'groceries', 'Whole Foods', '2024-01-15', 'Monthly budget target: $400');
-```
+- **Scoped Schema**: The LLM can create tables, store data, and perform operations exclusively within the `memories` schema by calling an execute_sql tool
+- **System Table Protection**: All other schemas, including `public`, are inaccessible to the LLM.
 
 ### Messages Context
 
-Two complementary memory types maintain conversation continuity:
+Three complementary memory types maintain conversation continuity:
 
-- **Semantic Memory (Vector Search)**: Stores conversation embeddings using pgvector for fuzzy concept retrieval ("that productivity thing we talked about last month")
+- **Message History (Short-term Memory)**: Maintains a chronological list of recent messages for immediate context
+- **Semantic Memory (Vector Search using pgvector)**: Stores conversation embeddings using pgvector for fuzzy concept retrieval ("that productivity thing we talked about last month")
 - **Structured Memory (SQL Data)**: Stores concrete facts in LLM-created tables for precise queries ("How much did I spend on coffee last quarter?")
 
 ### Scheduled Prompts
 
-The system's autonomy emerges through scheduled prompts via pg_cron that can make use of all other pieces:
+The system achieves autonomy through scheduled prompts which are powered by pg_cron through a dedicated tool. Scheduled prompts call the same natural-db endpoints and can therefore use all the same tools.
 
 **Example**: "Every Sunday at 6 PM, analyze my portfolio performance and research market trends"
 
-1. **Cron trigger** executes with stored prompt
-2. **Database lookup** retrieves your current portfolio holdings and historical performance
-3. **Web search** finds relevant market news and competitor analysis
-4. **Database storage** accumulates weekly performance data and market insights
-5. **MCP integration** sends personalized report via Zapier with portfolio highlights and recommendations
-6. **Memory building** enables future queries like "How has my portfolio performed compared to market trends?"
+1.  **A cron job** executes a stored prompt at the scheduled time.
+2.  **The secure tool** uses elevated permissions (`service_role`) to retrieve data from anywhere in your database, like current portfolio holdings.
+3.  **Web search** is triggered to find relevant market news and competitor analysis.
+4.  **Database storage** in the `memories` schema accumulates weekly performance data.
+5.  **MCP integration** sends a personalized report via Zapier.
+6.  **Memory building** enables future queries like "How has my portfolio performed compared to market trends?"
 
 ### Web Search
 
@@ -83,8 +71,6 @@ Through Zapier's MCP integration, your assistant can:
 - Create tasks (Trello, Asana, Notion)
 - Control smart home devices
 
-These aren't one-off actions—they're integrated into the data collection and analysis workflow.
-
 ### Input/Output Integration
 
 The system uses Telegram as the default interface, implemented as an edge function with webhook support for real-time messaging. All input/output is processed through the `natural-db` function for consistent behavior.
@@ -93,14 +79,10 @@ The system uses Telegram as the default interface, implemented as an edge functi
 
 The assistant maintains two behavioral layers:
 
-- **Base Behavior**: Core functionality (database operations, scheduling, web search) remains constant
-- **Personalized Behavior**: Communication style and preferences that evolve based on user feedback
+- **Base Behavior**: Core functionality (database operations, scheduling, web search) remains constant via a constant system prompt
+- **Personalized Behavior**: Communication style and preferences that evolve based on user feedback which can be changed via a dedicated tool and stored in a public.system_prompts table
 
-When you say "be more formal" or "address me by name," these preferences are stored with version history and persist across all conversations, creating a truly personalized AI companion.
-
-## Code Ownership & Extensibility
-
-As the codebase owner, you have complete control over your assistant's capabilities, allowing you to modify base behavior by customizing system prompts to adjust personality and expertise or create custom edge functions for specific needs.
+When you say "be more formal" or "address me by name," these preferences are stored with version history and persist across all conversations, creating a personalized experience.
 
 ## Use Cases
 
@@ -126,15 +108,15 @@ As the codebase owner, you have complete control over your assistant's capabilit
 5. **Telegram notifications** sends daily meal suggestions, cooking reminders, weekly grocery lists based on planned meals, and evening meal rating prompts
 6. **Daily rating system** collects user feedback on each meal through Telegram, storing ratings and comments to improve future meal suggestions
 
-### Travel Planning & Experience Tracking
+### Company Feedback Analysis
 
-**Setup**: "Help me research destinations and track my travel experiences"
+**Setup**: "Every morning, pull the latest support tickets via MCP, analyze them, store the findings in a `feedback` table with tags, and give me a weekly summary."
 
-1. **Database storage** creates `destinations`, `trip_plans`, and `travel_experiences` tables to store research findings, itineraries, and post-trip reflections
-2. **Web search** finds destination information, flight deals, and local recommendations based on travel preferences
-3. **Database lookup** analyzes past trip satisfaction, budget patterns, and preferred activities
-4. **Cron trigger** runs monthly to suggest new destinations and seasonal travel deals
-5. **MCP integration** automatically adds trip dates to calendar and sends pre-trip reminders with personalized packing lists and local tips
+1.  **Cron Trigger**: A `pg_cron` job runs every morning to initiate the ticket analysis workflow.
+2.  **MCP Integration**: Connects to your support system (e.g., Zendesk, Intercom) to fetch new tickets.
+3.  **AI Analysis & Storage**: The assistant processes each ticket, identifies key themes, sentiment, and product areas, then stores this structured data with tags in a `feedback` table.
+4.  **Weekly Summary**: Every Friday, another cron job generates a summary of the week's feedback, highlighting top issues, sentiment trends, and feature requests.
+5.  **Group Email**: The weekly summary is delivered as a concise report via Zapier's Gmail MCP, keeping your team informed of the customer's voice.
 
 ### Interest-Based Article Bookmarker
 
@@ -155,13 +137,40 @@ As the codebase owner, you have complete control over your assistant's capabilit
 - Telegram bot token
 - Zapier account (optional)
 
+### Optional: Using the CLI
+
+If you prefer the command line, you can use the Supabase CLI to set up your database and Edge Functions. This replaces **Step 1** and **Step 2**.
+
+1.  **Clone the repository**.
+    ```bash
+    git clone https://github.com/supabase-community/natural-db.git
+    cd natural-db
+    ```
+2.  **Log in to the Supabase CLI and link your project**.
+    Create a new project on the [Supabase Dashboard](https://supabase.com/dashboard), then run:
+    ```bash
+    supabase login
+    supabase link --project-ref <YOUR-PROJECT-ID>
+    ```
+3.  **Push the database schema**.
+    ```bash
+    supabase db push
+    ```
+4.  **Deploy Edge Functions**.
+    ```bash
+    supabase functions deploy --no-verify-jwt
+    ```
+
+After completing these steps, you can proceed to **Step 3: Telegram Bot**.
+
 ### Step 1: Database Setup
 
 Run the migration SQL in your Supabase SQL editor: [migration.sql](https://github.com/supabase-community/natural-db/blob/main/supabase/migrations/001_create_initial_schema.sql)
 
-- Sets up extensions (pgvector, pg_cron)
-- Creates system tables with proper permissions
-- Configures cron job scheduling
+- Sets up required extensions like `pgvector` and `pg_cron`.
+- Creates the `memories` schema for the assistant's data.
+- Creates the `memories_role` with scoped permissions to the `memories` schema.
+- Configures cron job scheduling.
 
 ### Step 2: Edge Functions
 
@@ -237,18 +246,8 @@ Based on 10 messages per day (300 messages/month):
 
 **Total monthly cost: ~$0.54**
 
-Note: Costs scale linearly with usage. At 100 messages/day (~3K messages/month), expect ~$5.40/month.
+## Make it your own
 
-## Summary
+This experiment demonstrates the power of combining fundamental building blocks, with an LLM being one, to create something greater than the sum of its parts. My hope is this also inspires you to build and deploy your own personalized assistant in a way that still gives you control over the code and the data.
 
-This system leverages what LLMs do best—understanding natural language and transforming it into structured data—while solving their biggest weakness: memory persistence. By combining this with PostgreSQL's querying power, cron scheduling, and external tool integration, you get an AI that genuinely gets smarter over time.
-
-**Key advantages**:
-
-- **Persistent Memory**: Each interaction builds structured, queryable knowledge
-- **Complete Privacy**: Isolated database schemas ensure bulletproof data security
-- **Autonomous Intelligence**: Scheduled operations create self-improving analysis loops
-- **Real-world Integration**: Actions across email, calendar, and hundreds of tools
-- **Adaptive Personality**: Evolving communication style based on user preferences
-
-This isn't just another chatbot—it's a persistent AI companion that accumulates knowledge and takes autonomous action, becoming more valuable the longer you use it.
+If you're interested in helping to evolve this as a starting template, please feel free to contribute via issues, discussions or pull requests.

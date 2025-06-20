@@ -12,8 +12,8 @@ CREATE EXTENSION IF NOT EXISTS "http";
 CREATE TABLE IF NOT EXISTS public.profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     auth_user_id UUID UNIQUE,
-    telegram_id BIGINT UNIQUE,
-    telegram_username TEXT,
+    service_id BIGINT UNIQUE,
+    username TEXT,
     first_name TEXT,
     last_name TEXT,
     timezone TEXT,

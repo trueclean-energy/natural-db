@@ -11,32 +11,14 @@ import {
   getMemoriesSchemaDetails
 } from "./db-utils.ts";
 import { createClient } from "npm:@supabase/supabase-js";
-
-// Factory for all AI tools (isolated for easier extensibility)
 import { createTools } from "./tools.ts";
 
-/**
- * AI DB Handler with Chat-Specific Schema Isolation
- *
- * This handler creates isolated schemas for each chat_id, providing secure
- * database operations while protecting system tables in the public schema.
- *
- * Architecture:
- * - Creates chat-specific schemas (chat_{chat_id}) for LLM operations
- * - System tables (messages, system_prompts) remain in public schema
- * - LLM has no access to public schema or other chats' schemas
- * - Provides SQL execution, scheduling capabilities, and message handling
- * - Vector search and embedding functionality handled internally
- * - Each chat operates in complete isolation from others
- */
-
-// Environment Variables
 const supabaseUrl = Deno.env.get("SUPABASE_URL");
 const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
 const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
 const zapierMcpUrl = Deno.env.get("ZAPIER_MCP_URL");
-const allowedUsernames = Deno.env.get("TELEGRAM_ALLOWED_USERNAMES");
+const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
 
 if (!supabaseUrl || !supabaseServiceRoleKey || !openaiApiKey) {
   throw new Error("Missing required environment variables");
@@ -52,7 +34,6 @@ const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 const MAX_CHAT_HISTORY = 10;
 const MAX_RELEVANT_MESSAGES = 5;
 
-// Zod schema for validating incoming edge-function payload
 const IncomingPayloadSchema = z.object({
   userPrompt: z.string().min(1),
   id: z.union([z.string(), z.number()]),
@@ -62,6 +43,21 @@ const IncomingPayloadSchema = z.object({
   incomingMessageRole: z.enum(["user", "assistant", "system", "system_routine_task"]),
   callbackUrl: z.string().url(),
 });
+
+interface ColumnInfo {
+  table_name: string;
+  column_name: string;
+  data_type: string;
+  udt_name: string;
+  table_comment?: string | null;
+  column_comment?: string | null;
+}
+
+interface ChatMessage {
+  role: "user" | "assistant" | "system" | "system_routine_task";
+  content: string;
+  created_at?: string;
+}
 
 async function getActiveCronJobDetails(chatId: string | number) {
   const result = await executePrivilegedSQL(
@@ -75,7 +71,7 @@ async function getActiveCronJobDetails(chatId: string | number) {
   return result.error ? result : { result: result.result };
 }
 
-async function getChatSchemaDetailsFormatted(_chatId?: string | number) {
+async function getChatSchemaDetailsFormatted() {
   const operationResult = await getMemoriesSchemaDetails();
 
   if (operationResult.error) {
@@ -94,24 +90,7 @@ async function getChatSchemaDetailsFormatted(_chatId?: string | number) {
   const schemaData = schemaContents.columns;
   let formattedString = `\nDetails of your private database schema:\n`;
 
-  // ----------------------
-  // Type declarations
-  // ----------------------
 
-  interface ColumnInfo {
-    table_name: string;
-    column_name: string;
-    data_type: string;
-    udt_name: string;
-    table_comment?: string | null;
-    column_comment?: string | null;
-  }
-
-  interface ChatMessage {
-    role: "user" | "assistant" | "system" | "system_routine_task";
-    content: string;
-    created_at?: string;
-  }
 
   const tables: Record<string, { columns: ColumnInfo[]; comment?: string | null }> = {};
 
@@ -250,20 +229,30 @@ function isUsernameAllowed(username: string | undefined): boolean {
   return allowedList.includes(username.toLowerCase());
 }
 
-// Ensure chat & membership exist (to satisfy FKs and RLS)
-async function ensureChatAndMembership(chatId: string | number, profileId: string) {
+async function verifyUserChatAccess(userId: string, chatId: string | number): Promise<boolean> {
   try {
-    const chatIdText = chatId.toString();
-    await supabase
-      .from('chats')
-      .upsert({ id: chatIdText, created_by: profileId }, { onConflict: 'id' });
-    await supabase
+    const { data: membershipRow, error } = await supabase
       .from('chat_users')
-      .upsert({ chat_id: chatIdText, user_id: profileId }, { onConflict: 'chat_id,user_id' });
+      .select('chat_id')
+      .eq('chat_id', chatId.toString())
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Error checking chat membership:', error);
+      return false;
+    }
+
+    return !!membershipRow;
   } catch (e) {
-    console.error('ensureChatAndMembership error:', e);
+    console.error('verifyUserChatAccess error:', e);
+    return false;
   }
 }
+
+// ------------------------------------------------------------------
+//  Main Function
+// ------------------------------------------------------------------
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
@@ -290,29 +279,42 @@ Deno.serve(async (req) => {
       callbackUrl,
     } = parsed.data;
 
-    // Ensure chat and membership rows exist to satisfy FK during message insert
-    if (id && userId) {
-      await ensureChatAndMembership(id, userId);
+    // Require both id and userId for authorization
+    if (!id || !userId || !allowedUsernames) {
+      return new Response(
+        JSON.stringify({ status: 'missing_required_parameters' }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
 
-    // ------------------------------------------------------------------
-    //  Username Authorization Check (Telegram)
-    // ------------------------------------------------------------------
+    // Verify user has access to the chat
+    const hasAccess = await verifyUserChatAccess(userId, id);
+    if (!hasAccess) {
+      return new Response(
+        JSON.stringify({ status: 'unauthorized_chat_access' }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // Check username authorization (if allowedUsernames is configured)
     if (allowedUsernames) {
       try {
         const { data: profileRow, error: profileErr } = await supabase
           .from('profiles')
-          .select('telegram_username')
+          .select('username')
           .eq('id', userId)
           .single();
 
         if (profileErr) {
           console.error('Error fetching profile for auth check:', profileErr);
-          return new Response("Unauthorized user", { status: 403 });
+          return new Response(
+            JSON.stringify({ status: 'unauthorized_user' }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
         }
 
-        const telegramUsername: string | undefined = profileRow?.telegram_username ?? undefined;
-        if (!isUsernameAllowed(telegramUsername)) {
+        const username: string | undefined = profileRow?.username ?? undefined;
+        if (!isUsernameAllowed(username)) {
           return new Response(
             JSON.stringify({ status: 'unauthorized_user' }),
             { status: 200, headers: { "Content-Type": "application/json" } },
@@ -320,11 +322,12 @@ Deno.serve(async (req) => {
         }
       } catch (authErr) {
         console.error('Authorization check failed:', authErr);
-        return new Response("Unauthorized user", { status: 403 });
+        return new Response(
+          JSON.stringify({ status: 'unauthorized_user' }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
       }
     }
-
-    // Authorization Gate removed – single-tenant mode (no chat_users table)
 
     const cronCallbackUrl = `${supabaseUrl}/functions/v1/natural-db`;
 
@@ -389,7 +392,7 @@ Deno.serve(async (req) => {
 
     // Get schema and cron job details
     let formattedSchemaDetails = `You are operating within your own private database schema.`;
-    const schemaResult = await getChatSchemaDetailsFormatted(id);
+    const schemaResult = await getChatSchemaDetailsFormatted();
     if (schemaResult.error) {
       formattedSchemaDetails += `\n(Could not fetch schema details: ${schemaResult.error})`;
     } else if (typeof schemaResult.schemaDetails === "string") {

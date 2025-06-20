@@ -96,7 +96,7 @@ async function handleLLMDbOperation<T>(
     const err = e as { message?: string; fields?: Record<string, { code?: string }> };
     console.error(`LLM operation error in ${operationName}:`, err);
     return {
-      error: `Execution failed for ${operationName}: ${err.message ?? "Unknown error"}${
+      error: `Execution failed for ${operationName}: ${err.message || "Unknown error"}${
         (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
       }`,
     };
@@ -134,7 +134,7 @@ async function handleSystemDbOperation<T>(
     const err = e as { message?: string; fields?: Record<string, { code?: string }> };
     console.error(`System operation error in ${operationName}:`, err);
     return {
-      error: `Execution failed for ${operationName}: ${err.message ?? "Unknown error"}${
+      error: `Execution failed for ${operationName}: ${err.message || "Unknown error"}${
         (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
       }`,
     };

@@ -10,8 +10,8 @@ const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
 const telegramWebhookSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
 const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
-const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
-const allowedUsernames = Deno.env.get("TELEGRAM_ALLOWED_USERNAMES");
+const openaiModel = Deno.env.get("OPENAI_MODEL") || "gpt-4.1-mini";
+const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
 const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
 if (!supabaseUrl || !supabaseServiceRoleKey || !telegramBotToken || !openaiApiKey || !supabaseAnonKey) {
@@ -24,8 +24,8 @@ const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 interface Metadata {
   userId: string;
   platform?: string;
-  telegramUserId?: number;
-  telegramUsername?: string;
+  serviceId?: number;
+  username?: string;
   chatId?: string | number;
 }
 
@@ -65,6 +65,8 @@ const UpdateSchema = z.object({
   message: MessageSchema.optional(),
   callback_query: CallbackQuerySchema.optional(),
 }).passthrough();
+
+type TelegramUpdate = z.infer<typeof UpdateSchema>;
 
 async function answerCallbackQuery(callbackQueryId: string, text: string | null = null) {
   if (!telegramBotToken) return;
@@ -163,8 +165,6 @@ Deno.serve(async (req) => {
   }
 });
 
-type TelegramUpdate = z.infer<typeof UpdateSchema>;
-
 async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers: Headers, aiFunctionName: string) {
   // Validate and parse webhook body
   const parsed = UpdateSchema.safeParse(body);
@@ -253,11 +253,11 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   let profileId: string | undefined;
   let userTimezone: string | null = null;
   try {
-    // Check for existing profile by telegram_id
+    // Check for existing profile by service_id
     const { data: existingProfiles, error: profErr } = await supabaseAdmin
       .from("profiles")
       .select("id, auth_user_id, timezone")
-      .eq("telegram_id", telegramUserId)
+      .eq("service_id", telegramUserId)
       .maybeSingle();
 
     if (profErr) {
@@ -267,8 +267,8 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
     if (!existingProfiles) {
       const { data: insertProf, error: insErr } = await supabaseAdmin.from("profiles").insert({
         auth_user_id: newUserId,
-        telegram_id: telegramUserId,
-        telegram_username: username,
+        service_id: telegramUserId,
+        username: username,
         first_name: firstName,
         last_name: lastName,
         timezone: null,
@@ -277,7 +277,7 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
       profileId = insertProf.id;
     } else {
       profileId = existingProfiles.id;
-      userTimezone = existingProfiles.timezone ?? null;
+      userTimezone = existingProfiles.timezone || null;
       if (existingProfiles.auth_user_id !== newUserId) {
         await supabaseAdmin.from("profiles").update({ auth_user_id: newUserId }).eq("id", profileId);
       }
@@ -355,8 +355,8 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
         userId: profileId,
         metadata: {
           platform: "telegram",
-          telegramUserId,
-          telegramUsername: username,
+          serviceId: telegramUserId,
+          username: username,
           chatId,
         },
         timezone: null,
@@ -395,8 +395,8 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
         userId: profileId,
         metadata: {
           platform: "telegram",
-          telegramUserId,
-          telegramUsername: username,
+          serviceId: telegramUserId,
+          username: username,
           chatId,
         },
         timezone: null, // No timezone set yet

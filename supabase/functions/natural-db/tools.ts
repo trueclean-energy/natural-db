@@ -60,7 +60,7 @@ export function createTools(opts: ToolOptions) {
         }
         return JSON.stringify({
           message: "Command executed successfully.",
-          rowCount: Number(result.rowCount ?? 0),
+          rowCount: Number(result.rowCount || 0),
         });
       },
     }),

@@ -4,7 +4,7 @@ import { createClient } from "npm:@supabase/supabase-js";
 const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
 const supabaseUrl = Deno.env.get("SUPABASE_URL");
 const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const allowedUsernames = Deno.env.get("TELEGRAM_ALLOWED_USERNAMES");
+const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
 
 if (!telegramBotToken) {
   throw new Error("Missing TELEGRAM_BOT_TOKEN environment variable");
@@ -61,25 +61,25 @@ Deno.serve(async (req) => {
     }
 
     // ------------------------------------------------------------------
-    //  Username Authorization Check (Telegram)
+    //  Username Authorization Check
     // ------------------------------------------------------------------
-    let telegramUsername: string | undefined = metadata?.telegramUsername;
-    if (!telegramUsername) {
+    let username: string | undefined = metadata?.username;
+    if (!username) {
       try {
         const { data: prof, error: profErr } = await supabase
           .from('profiles')
-          .select('telegram_username')
+          .select('username')
           .eq('id', userId)
           .single();
         if (!profErr) {
-          telegramUsername = prof?.telegram_username ?? undefined;
+          username = prof?.username || undefined;
         }
       } catch (_e) {
         // Silent failure; will be caught by authorization logic
       }
     }
 
-    if (!isUsernameAllowed(telegramUsername)) {
+    if (!isUsernameAllowed(username)) {
       return new Response(
         JSON.stringify({ status: 'unauthorized_user' }),
         { headers: { "Content-Type": "application/json" }, status: 200 },

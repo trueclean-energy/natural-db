@@ -125,9 +125,12 @@ export function createTools(opts: ToolOptions) {
           ? job_name.replace(/[^a-zA-Z0-9_]/g, "_").substring(0, 18)
           : Date.now().toString();
 
+        // Sanitize id to prevent SQL injection
+        const sanitizedId = String(id).replace(/[^a-zA-Z0-9_]/g, "_");
+        
         const finalJobName = isOneOff
-          ? `one_off_${id}_${descriptiveSuffix}`
-          : `cron_${id}_${descriptiveSuffix}`;
+          ? `one_off_${sanitizedId}_${descriptiveSuffix}`
+          : `cron_${sanitizedId}_${descriptiveSuffix}`;
 
         let sqlCommand: string;
         if (isOneOff) {

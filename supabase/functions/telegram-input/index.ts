@@ -181,12 +181,19 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   let firstName: string | undefined = undefined;
   let lastName: string | undefined = undefined;
 
-  // Check webhook secret
-  if (telegramWebhookSecret) {
-    const secretHeader = headers.get("X-Telegram-Bot-Api-Secret-Token");
-    if (secretHeader !== telegramWebhookSecret) {
-      return new Response("Forbidden", { status: 403 });
-    }
+  // Check webhook secret (REQUIRED for security)
+  if (!telegramWebhookSecret) {
+    console.error("SECURITY WARNING: TELEGRAM_WEBHOOK_SECRET not configured");
+    return new Response("Service Unavailable", { status: 503 });
+  }
+  
+  const secretHeader = headers.get("X-Telegram-Bot-Api-Secret-Token");
+  if (!secretHeader || secretHeader !== telegramWebhookSecret) {
+    console.warn("Webhook authentication failed", { 
+      hasSecret: !!secretHeader,
+      timestamp: new Date().toISOString() 
+    });
+    return new Response("Forbidden", { status: 403 });
   }
 
   // Parse webhook update using validated data

@@ -225,6 +225,16 @@ export async function searchSimilarMessages(
   }
 
   const result = await handleSystemDbOperation("search_similar_messages", async (connection) => {
+    // First verify user has access to this chat
+    const membershipCheck = await connection.queryObject({
+      text: `SELECT 1 FROM public.chat_users WHERE chat_id = $1 AND user_id = $2`,
+      args: [chatId.toString(), userId]
+    });
+    
+    if (membershipCheck.rows.length === 0) {
+      return [];
+    }
+
     // Use parameterized query to safely pass the embedding vector
     const result = await connection.queryObject({
       text: `
@@ -260,6 +270,18 @@ export async function loadRecentMessages(
   try {
     if (!chatId) {
       return { result: [], error: null };
+    }
+
+    // First verify user has access to this chat
+    const { data: membershipData, error: membershipError } = await supabaseClient
+      .from("chat_users")
+      .select("chat_id")
+      .eq("chat_id", chatId.toString())
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (membershipError || !membershipData) {
+      return { result: [], error: "User not authorized for this chat" };
     }
 
     const query = supabaseClient

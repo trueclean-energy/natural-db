@@ -57,13 +57,13 @@ export function convertBigIntsToStrings<T>(obj: T): ReplaceBigIntWithString<T> {
     return obj.map((item) => convertBigIntsToStrings(item)) as ReplaceBigIntWithString<T>;
   }
   if (typeof obj === "object") {
-    const newObj: any = {};
+    const newObj: Record<string, unknown> = {};
     for (const key in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        newObj[key] = convertBigIntsToStrings((obj as any)[key]);
+        newObj[key] = convertBigIntsToStrings((obj as Record<string, unknown>)[key]);
       }
     }
-    return newObj;
+    return newObj as ReplaceBigIntWithString<T>;
   }
   return obj as ReplaceBigIntWithString<T>;
 }
@@ -97,7 +97,7 @@ async function handleLLMDbOperation<T>(
     console.error(`LLM operation error in ${operationName}:`, err);
     return {
       error: `Execution failed for ${operationName}: ${err.message || "Unknown error"}${
-        (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
+        (err as { fields?: { code?: string } }).fields?.code ? ` (Code: ${(err as { fields: { code: string } }).fields.code})` : ""
       }`,
     };
   } finally {
@@ -135,7 +135,7 @@ async function handleSystemDbOperation<T>(
     console.error(`System operation error in ${operationName}:`, err);
     return {
       error: `Execution failed for ${operationName}: ${err.message || "Unknown error"}${
-        (err as any).fields?.code ? ` (Code: ${(err as any).fields.code})` : ""
+        (err as { fields?: { code?: string } }).fields?.code ? ` (Code: ${(err as { fields: { code: string } }).fields.code})` : ""
       }`,
     };
   } finally {

@@ -1,46 +1,50 @@
 import { createClient } from "npm:@supabase/supabase-js";
 
-// Environment Variables
-const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
-const supabaseUrl = Deno.env.get("SUPABASE_URL");
-const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
+const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
 
-if (!telegramBotToken) {
-  throw new Error("Missing TELEGRAM_BOT_TOKEN environment variable");
-}
-
-if (!supabaseUrl || !supabaseServiceRoleKey) {
-  throw new Error("Missing Supabase environment variables");
+if (!telegramBotToken || !supabaseUrl || !supabaseServiceRoleKey) {
+  throw new Error("Missing required environment variables");
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-function isUsernameAllowed(username: string | undefined): boolean {
+interface OutgoingPayload {
+  finalResponse: string;
+  id: string | number;
+  userId: string;
+  metadata: {
+    username?: string;
+    chatId: string | number;
+  };
+}
+
+function isUsernameAllowed(username?: string): boolean {
   if (!allowedUsernames) return true;
   if (!username) return false;
   const allowedList = allowedUsernames.split(',').map(u => u.trim().toLowerCase());
   return allowedList.includes(username.toLowerCase());
 }
 
-async function sendTelegramMessage(chatId: string | number, text: string, parseMode: string = "HTML") {
+async function sendTelegramMessage(chatId: string | number, text: string): Promise<void> {
   const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
-  const messagePayload = {
+  const payload = {
     chat_id: chatId,
-    text: text,
-    parse_mode: parseMode,
+    text,
+    parse_mode: "HTML" as const,
   };
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(messagePayload),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      const responseData = await response.json();
-      console.error(`Failed to send message: ${response.status}`, responseData);
+      console.error(`Failed to send message: ${response.status}`, await response.json());
     }
   } catch (error) {
     console.error("Error sending Telegram message:", error);
@@ -53,17 +57,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const body = await req.json();
+    const body: OutgoingPayload = await req.json();
     const { finalResponse, id, userId, metadata } = body;
 
     if (!finalResponse || !id || !userId) {
       return new Response("Invalid request body", { status: 400 });
     }
 
-    // ------------------------------------------------------------------
-    //  Username Authorization Check
-    // ------------------------------------------------------------------
-    let username: string | undefined = metadata?.username;
+    let username = metadata?.username;
     if (!username) {
       try {
         const { data: prof, error: profErr } = await supabase

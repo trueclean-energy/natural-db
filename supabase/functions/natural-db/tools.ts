@@ -119,13 +119,14 @@ export function createTools(opts: ToolOptions) {
           ) {
             isOneOff = true;
           }
-        } catch (_) {}
+        } catch (_) {
+          // Not a valid date
+        }
 
         const descriptiveSuffix = job_name
           ? job_name.replace(/[^a-zA-Z0-9_]/g, "_").substring(0, 18)
           : Date.now().toString();
 
-        // Sanitize id to prevent SQL injection
         const sanitizedId = String(id).replace(/[^a-zA-Z0-9_]/g, "_");
         
         const finalJobName = isOneOff

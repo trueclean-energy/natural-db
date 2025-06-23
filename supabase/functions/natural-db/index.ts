@@ -13,9 +13,9 @@ import {
 import { createClient } from "npm:@supabase/supabase-js";
 import { createTools } from "./tools.ts";
 
-const supabaseUrl = Deno.env.get("SUPABASE_URL");
-const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const openaiApiKey = Deno.env.get("OPENAI_API_KEY")!;
 const openaiModel = Deno.env.get("OPENAI_MODEL") ?? "gpt-4.1-mini";
 const zapierMcpUrl = Deno.env.get("ZAPIER_MCP_URL");
 const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
@@ -37,8 +37,8 @@ const MAX_RELEVANT_MESSAGES = 5;
 const IncomingPayloadSchema = z.object({
   userPrompt: z.string().min(1),
   id: z.union([z.string(), z.number()]),
-  userId: z.string().uuid().or(z.string()), // allow uuid but keep generic string fallback
-  metadata: z.record(z.any()).optional(),
+  userId: z.string().uuid().or(z.string()),
+  metadata: z.record(z.unknown()).optional(),
   timezone: z.string().nullable().optional(),
   incomingMessageRole: z.enum(["user", "assistant", "system", "system_routine_task"]),
   callbackUrl: z.string().url(),
@@ -57,6 +57,11 @@ interface ChatMessage {
   role: "user" | "assistant" | "system" | "system_routine_task";
   content: string;
   created_at?: string;
+}
+
+interface CronJob {
+  jobname: string;
+  schedule: string;
 }
 
 async function getActiveCronJobDetails(chatId: string | number) {
@@ -89,8 +94,6 @@ async function getChatSchemaDetailsFormatted() {
 
   const schemaData = schemaContents.columns;
   let formattedString = `\nDetails of your private database schema:\n`;
-
-
 
   const tables: Record<string, { columns: ColumnInfo[]; comment?: string | null }> = {};
 
@@ -136,7 +139,7 @@ async function getChatSchemaDetailsFormatted() {
   return { schemaDetails: formattedString };
 }
 
-async function saveMessage(userId: string, content: string, role: string, chatId: string, embedding?: string) {
+async function saveMessage(userId: string, content: string, role: string, chatId: string, embedding?: string): Promise<void> {
   try {
     const insertResult = await insertMessage(supabase, userId, content, role, chatId, embedding);
     if (insertResult.error) {
@@ -179,7 +182,6 @@ async function getCurrentSystemPrompt(chatId: string): Promise<string | null> {
 
 async function updateSystemPrompt(chatId: string, newPrompt: string, description: string): Promise<{ success: boolean; error?: string }> {
   try {
-    // First, deactivate all existing prompts for this chat
     const { error: deactivateError } = await supabase
       .from('system_prompts')
       .update({ is_active: false })
@@ -190,7 +192,6 @@ async function updateSystemPrompt(chatId: string, newPrompt: string, description
       return { success: false, error: `Failed to deactivate old prompts: ${deactivateError.message}` };
     }
 
-    // Get the next version number
     const { data: versionData, error: versionError } = await supabase
       .from('system_prompts')
       .select('version')
@@ -200,7 +201,6 @@ async function updateSystemPrompt(chatId: string, newPrompt: string, description
 
     const nextVersion = (versionData && versionData.length > 0) ? versionData[0].version + 1 : 1;
 
-    // Insert the new active prompt
     const { error: insertError } = await supabase
       .from('system_prompts')
       .insert({
@@ -222,8 +222,8 @@ async function updateSystemPrompt(chatId: string, newPrompt: string, description
   }
 }
 
-function isUsernameAllowed(username: string | undefined): boolean {
-  if (!allowedUsernames) return true; // If not configured, allow all
+function isUsernameAllowed(username?: string): boolean {
+  if (!allowedUsernames) return true;
   if (!username) return false;
   const allowedList = allowedUsernames.split(',').map(u => u.trim().toLowerCase());
   return allowedList.includes(username.toLowerCase());
@@ -279,7 +279,6 @@ Deno.serve(async (req) => {
       callbackUrl,
     } = parsed.data;
 
-    // Require both id and userId for authorization
     if (!id || !userId || !allowedUsernames) {
       return new Response(
         JSON.stringify({ status: 'missing_required_parameters' }),
@@ -287,7 +286,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Verify user has access to the chat
     const hasAccess = await verifyUserChatAccess(userId, id);
     if (!hasAccess) {
       return new Response(
@@ -296,7 +294,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Check username authorization (if allowedUsernames is configured)
     if (allowedUsernames) {
       try {
         const { data: profileRow, error: profileErr } = await supabase
@@ -334,7 +331,6 @@ Deno.serve(async (req) => {
     let chatHistory: ChatMessage[] = [];
     let relevantContext: ChatMessage[] = [];
 
-    // Load message history and save incoming message
     if (incomingMessageRole !== "system_routine_task") {
       try {
         const messageHistory = await loadRecentAndRelevantMessages(
@@ -365,7 +361,6 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Initialize MCP client if available
     let mcpTools: Record<string, unknown> = {};
     if (zapierMcpUrl) {
       try {
@@ -390,7 +385,6 @@ Deno.serve(async (req) => {
 
     const tools = { ...baseTools, ...mcpTools };
 
-    // Get schema and cron job details
     let formattedSchemaDetails = `You are operating within your own private database schema.`;
     const schemaResult = await getChatSchemaDetailsFormatted();
     if (schemaResult.error) {
@@ -406,7 +400,7 @@ Deno.serve(async (req) => {
         activeCronJobsString = `Note: Error fetching scheduled routines: ${cronJobsResult.error}`;
       } else if (cronJobsResult.result && cronJobsResult.result.length > 0) {
         activeCronJobsString = "Currently Scheduled Routines:\n";
-        cronJobsResult.result.forEach((job: { jobname: string; schedule: string }) => {
+        cronJobsResult.result.forEach((job: CronJob) => {
           activeCronJobsString += `  - Job Name: ${job.jobname}, Schedule: ${job.schedule}\n`;
         });
       }
@@ -416,7 +410,6 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     
-    // Get custom system prompt from database
     const customSystemPrompt = await getCurrentSystemPrompt(id);
     
     const baseSystemPrompt = `BASE BEHAVIOR: You are a highly organized personal assistant with your own private database workspace.
@@ -481,7 +474,6 @@ ${timezone ? `- User Timezone: ${timezone}` : ''}
 - Store times in UTC (TIMESTAMPTZ), consider user timezone for display
 - Convert user local time to UTC when scheduling`;
 
-    // Construct the final system prompt - always start with base behavior
     const selfModificationNote = `
 
 PERSONALIZATION CAPABILITY:
@@ -494,7 +486,6 @@ Use 'get_system_prompt_history' to view previous personalization versions and th
       ? `${baseSystemPrompt}\n\nPERSONALIZED BEHAVIOR:\n${customSystemPrompt}\n\n${selfModificationNote}`
       : `${baseSystemPrompt}${selfModificationNote}`;
 
-    // Prepare messages for AI
     let messagesForAI = [...chatHistory];
     let enhancedSystemPrompt = finalSystemPrompt;
     
@@ -522,7 +513,7 @@ Use 'get_system_prompt_history' to view previous personalization versions and th
     if (incomingMessageRole === "system_routine_task" && metadata.originalUserMessage) {
       allRelevantContext.push({
         role: "user",
-        content: metadata.originalUserMessage
+        content: metadata.originalUserMessage as string
       });
     }
     
@@ -554,11 +545,9 @@ Use 'get_system_prompt_history' to view previous personalization versions and th
     const trimmedFinalResponse = finalResponse.trim();
 
     if (trimmedFinalResponse.length > 0) {
-      // Save assistant response
       const responseEmbedding = await generateMessageEmbedding(trimmedFinalResponse);
       await saveMessage(userId, trimmedFinalResponse, "assistant", id, responseEmbedding);
 
-      // Send response to callback
       if (callbackUrl) {
         const outgoingPayload = {
           finalResponse: trimmedFinalResponse,

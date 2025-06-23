@@ -2,17 +2,15 @@ import { createClient } from "npm:@supabase/supabase-js";
 import { createOpenAI } from "npm:@ai-sdk/openai";
 import { generateText, tool } from "npm:ai";
 import { z } from "npm:zod";
-import { createClient as createSupabaseClient } from "npm:@supabase/supabase-js@2";
 
-// Environment Variables
-const supabaseUrl = Deno.env.get("SUPABASE_URL");
-const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
+const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
 const telegramWebhookSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
-const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
+const openaiApiKey = Deno.env.get("OPENAI_API_KEY")!;
 const openaiModel = Deno.env.get("OPENAI_MODEL") || "gpt-4.1-mini";
 const allowedUsernames = Deno.env.get("ALLOWED_USERNAMES");
-const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
 if (!supabaseUrl || !supabaseServiceRoleKey || !telegramBotToken || !openaiApiKey || !supabaseAnonKey) {
   throw new Error("Missing required environment variables");
@@ -21,20 +19,21 @@ if (!supabaseUrl || !supabaseServiceRoleKey || !telegramBotToken || !openaiApiKe
 const openai = createOpenAI({ apiKey: openaiApiKey });
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-interface Metadata {
+interface ProcessAiPayload {
+  userPrompt: string;
+  id: string;
   userId: string;
-  platform?: string;
-  serviceId?: number;
-  username?: string;
-  chatId?: string | number;
+  metadata: {
+    platform: string;
+    serviceId: number;
+    username?: string;
+    chatId: string | number;
+  };
+  timezone: string | null;
+  incomingMessageRole: string;
+  callbackUrl: string;
 }
 
-interface CallbackAnswerPayload {
-  callback_query_id: string;
-  text?: string;
-}
-
-// Zod schemas for Telegram webhook validation
 const TelegramUserSchema = z.object({
   id: z.number(),
   username: z.string().optional(),
@@ -68,12 +67,9 @@ const UpdateSchema = z.object({
 
 type TelegramUpdate = z.infer<typeof UpdateSchema>;
 
-async function answerCallbackQuery(callbackQueryId: string, text: string | null = null) {
-  if (!telegramBotToken) return;
-
+async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
   const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/answerCallbackQuery`;
-  const payload: CallbackAnswerPayload = { callback_query_id: callbackQueryId };
-  if (text) payload.text = text;
+  const payload = { callback_query_id: callbackQueryId, ...(text && { text }) };
 
   try {
     const response = await fetch(apiUrl, {
@@ -83,41 +79,37 @@ async function answerCallbackQuery(callbackQueryId: string, text: string | null 
     });
 
     if (!response.ok) {
-      const responseData = await response.json();
-      console.error(`Failed to answer callback query: ${response.status}`, responseData);
+      console.error(`Failed to answer callback query: ${response.status}`, await response.json());
     }
   } catch (error) {
     console.error("Error answering callback query:", error);
   }
 }
 
-async function sendTelegramMessage(chatId: string | number, text: string, parseMode: string = "HTML") {
-  if (!telegramBotToken) return;
-
+async function sendTelegramMessage(chatId: string | number, text: string): Promise<void> {
   const apiUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
-  const messagePayload = {
+  const payload = {
     chat_id: chatId,
-    text: text,
-    parse_mode: parseMode,
+    text,
+    parse_mode: "HTML" as const,
   };
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(messagePayload),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      const responseData = await response.json();
-      console.error(`Failed to send message: ${response.status}`, responseData);
+      console.error(`Failed to send message: ${response.status}`, await response.json());
     }
   } catch (error) {
     console.error("Error sending Telegram message:", error);
   }
 }
 
-function isUsernameAllowed(username: string | undefined): boolean {
+function isUsernameAllowed(username?: string): boolean {
   if (!allowedUsernames) return true;
   if (!username) return false;
   
@@ -154,34 +146,25 @@ Deno.serve(async (req) => {
   }
 
   const callbackUrl = `${supabaseUrl}/functions/v1/telegram-outgoing`;
-  const aiFunctionName = "natural-db"; // Supabase Edge Function to invoke
 
   try {
     const body = await req.json();
-    return await handleIncomingWebhook(body, callbackUrl, req.headers, aiFunctionName);
+    return await handleIncomingWebhook(body, callbackUrl, req.headers);
   } catch (error) {
     console.error("Error processing request:", error);
     return new Response("Internal Server Error", { status: 500 });
   }
 });
 
-async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers: Headers, aiFunctionName: string) {
-  // Validate and parse webhook body
+async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers: Headers): Promise<Response> {
   const parsed = UpdateSchema.safeParse(body);
   if (!parsed.success) {
     console.error("Invalid Telegram webhook payload:", parsed.error);
     return new Response("Bad Request", { status: 400 });
   }
+  
   const update = parsed.data;
 
-  let userPrompt: string | null = null;
-  let telegramUserId: number | null = null;
-  let chatId: string | number | null = null;
-  let username: string | undefined = undefined;
-  let firstName: string | undefined = undefined;
-  let lastName: string | undefined = undefined;
-
-  // Check webhook secret (REQUIRED for security)
   if (!telegramWebhookSecret) {
     console.error("SECURITY WARNING: TELEGRAM_WEBHOOK_SECRET not configured");
     return new Response("Service Unavailable", { status: 503 });
@@ -196,7 +179,13 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
     return new Response("Forbidden", { status: 403 });
   }
 
-  // Parse webhook update using validated data
+  let userPrompt: string | null = null;
+  let telegramUserId: number | null = null;
+  let chatId: string | number | null = null;
+  let username: string | undefined;
+  let firstName: string | undefined;
+  let lastName: string | undefined;
+
   if (update.message) {
     userPrompt = update.message.text;
     telegramUserId = update.message.from.id;
@@ -222,7 +211,6 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
     });
   }
 
-  // Validate username
   if (!isUsernameAllowed(username)) {
     return new Response(JSON.stringify({ status: "unauthorized_user" }), {
       headers: { "Content-Type": "application/json" },
@@ -233,7 +221,7 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   // -------------------------------------------------------------------
   // 1. Sign in anonymously to obtain a user session & JWT
   // -------------------------------------------------------------------
-  const anonClient = createSupabaseClient(supabaseUrl, supabaseAnonKey);
+  const anonClient = createClient(supabaseUrl, supabaseAnonKey);
   const { data: anonData, error: anonErr } = await anonClient.auth.signInAnonymously();
   if (anonErr || !anonData?.session?.access_token || !anonData.user?.id) {
     console.error("Anonymous sign-in failed:", anonErr);
@@ -243,8 +231,7 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   const newUserId = anonData.user.id;
   const accessToken = anonData.session.access_token;
 
-  // Create a single RLS-enabled Supabase client scoped to the current anonymous session
-  const supabaseRls = createSupabaseClient(
+  const supabaseRls = createClient(
     supabaseUrl,
     supabaseAnonKey,
     {
@@ -260,7 +247,6 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   let profileId: string | undefined;
   let userTimezone: string | null = null;
   try {
-    // Check for existing profile by service_id
     const { data: existingProfiles, error: profErr } = await supabaseAdmin
       .from("profiles")
       .select("id, auth_user_id, timezone")
@@ -303,7 +289,6 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
   // -------------------------------------------------------------------
   try {
     const chatIdText = chatId.toString();
-    // Insert chat; if it already exists ignore duplicate error
     const { error: chatInsertErr } = await supabaseRls
       .from("chats")
       .insert({ id: chatIdText, title: null, created_by: profileId });
@@ -311,7 +296,6 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
       throw chatInsertErr;
     }
 
-    // RLS-enabled client (scoped to the anonymous user)
     const { error: chatUserErr } = await supabaseRls
       .from("chat_users")
       .upsert({ chat_id: chatIdText, user_id: profileId }, { onConflict: "chat_id,user_id" });
@@ -393,25 +377,24 @@ async function handleIncomingWebhook(body: unknown, callbackUrl: string, headers
     }
   }
 
-  // Process AI request asynchronously with RLS client
-  const processAiRequest = async () => {
+  const processAiRequest = async (): Promise<void> => {
     try {
-      const payloadToAiDbHandler = {
+      const payloadToAiDbHandler: ProcessAiPayload = {
         userPrompt,
         id: chatId.toString(),
-        userId: profileId,
+        userId: profileId!,
         metadata: {
           platform: "telegram",
-          serviceId: telegramUserId,
+          serviceId: telegramUserId!,
           username: username,
           chatId,
         },
-        timezone: null, // No timezone set yet
+        timezone: null,
         incomingMessageRole: "user",
         callbackUrl: callbackUrl,
       };
 
-      const { error } = await supabaseRls.functions.invoke(aiFunctionName, {
+      const { error } = await supabaseRls.functions.invoke("natural-db", {
         body: payloadToAiDbHandler,
       });
       if (error) {

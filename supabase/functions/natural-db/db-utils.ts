@@ -85,16 +85,33 @@ async function handleLLMDbOperation<T>(
     await connection.queryObject(`SET ROLE "${roleName}";`);
     await connection.queryObject(`SET search_path TO "${schemaName}";`);
 
+    // Start transaction for SET LOCAL commands
+    await connection.queryObject(`BEGIN;`);
+
     // Resource-safety guards (per-query)
     // Limit runtime to 3 s and disable parallel plans so a single tenant cannot monopolise CPU cores.
     await connection.queryObject(`SET LOCAL statement_timeout = 3000;`);
     await connection.queryObject(`SET LOCAL max_parallel_workers_per_gather = 0;`);
 
     const result = await sqlLogic(connection, schemaName);
+    
+    // Commit the transaction
+    await connection.queryObject(`COMMIT;`);
+    
     return { result: convertBigIntsToStrings(result) };
   } catch (e: unknown) {
     const err = e as { message?: string; fields?: Record<string, { code?: string }> };
     console.error(`LLM operation error in ${operationName}:`, err);
+    
+    // Rollback transaction if it was started
+    if (connection) {
+      try {
+        await connection.queryObject(`ROLLBACK;`);
+      } catch (_) {
+        // Ignore rollback errors - transaction may not have been started
+      }
+    }
+    
     return {
       error: `Execution failed for ${operationName}: ${err.message || "Unknown error"}${
         (err as { fields?: { code?: string } }).fields?.code ? ` (Code: ${(err as { fields: { code: string } }).fields.code})` : ""
